@@ -1,55 +1,60 @@
 /***************************************************************************
- * tx_thread_system_return.S ¡ª Ïß³ÌÖ÷¶¯ÈÃ³öCPU
+ * tx_thread_system_return.S -- çº¿ç¨‹ä¸»åŠ¨è®©å‡º CPU (QingKe V3C / CH58x, HPE)
  *
- * ±£´æ solicited Õ»Ö¡, Ìø×ªµ½µ÷¶ÈÆ÷
- * Solicited ¸ñÊ½: frame_type(0) + s0-s11(12) + ra(1) + mstatus(1) = 15 words
+ * å†…æ ¸æœåŠ¡éœ€è¦é‡æ–°è°ƒåº¦æ—¶ä»çº¿ç¨‹ä¸Šä¸‹æ–‡è°ƒç”¨ (è°ƒç”¨è€…ä¿å­˜å¯„å­˜å™¨è§†ä¸ºå·²å¤±æ•ˆ,
+ * åªéœ€ä¿å­˜ ra/s0-s11/mstatus æ„æˆä¸»åŠ¨å¸§), éšåè¿”å›è°ƒåº¦å™¨ã€‚
  ***************************************************************************/
 
-    .section .highcode, "ax", @progbits
+    .section .highcode.tx_thread_system_return, "ax", @progbits
     .align 2
     .global _tx_thread_system_return
     .type   _tx_thread_system_return, @function
 
 _tx_thread_system_return:
-    /* ¹ØÖĞ¶Ï */
-    csrci   mstatus, 0x08
 
-    /* ·ÖÅä solicited Õ»Ö¡ */
-    addi    sp, sp, -(15 * 4)
-
-    /* frame_type = 0 (solicited) */
-    sw      zero, 0*4(sp)
-
-    /* ±£´æ callee-saved */
-    sw      s0,   1*4(sp)
-    sw      s1,   2*4(sp)
-    sw      s2,   3*4(sp)
-    sw      s3,   4*4(sp)
-    sw      s4,   5*4(sp)
-    sw      s5,   6*4(sp)
-    sw      s6,   7*4(sp)
-    sw      s7,   8*4(sp)
-    sw      s8,   9*4(sp)
-    sw      s9,  10*4(sp)
-    sw      s10, 11*4(sp)
-    sw      s11, 12*4(sp)
-
-    /* ±£´æ ra */
-    sw      ra,  13*4(sp)
-
-    /* ±£´æ mstatus */
+    /* æ„å»ºä¸»åŠ¨æ ˆå¸§ (16 å­—) */
+    addi    sp, sp, -64
+    sw      zero, 0(sp)                           /* å¸§ç±»å‹ = 0 (ä¸»åŠ¨) */
     csrr    t0, mstatus
-    sw      t0,  14*4(sp)
+    sw      t0, 0x38(sp)                          /* å…ˆä¿å­˜ mstatus (å« MIE åŸçŠ¶æ€) */
+    sw      ra,  0x04(sp)
+    sw      s0,  0x08(sp)
+    sw      s1,  0x0C(sp)
+    sw      s2,  0x10(sp)
+    sw      s3,  0x14(sp)
+    sw      s4,  0x18(sp)
+    sw      s5,  0x1C(sp)
+    sw      s6,  0x20(sp)
+    sw      s7,  0x24(sp)
+    sw      s8,  0x28(sp)
+    sw      s9,  0x2C(sp)
+    sw      s10, 0x30(sp)
+    sw      s11, 0x34(sp)
 
-    /* ±£´æÕ»Ö¸Õëµ½ TCB */
+    /* å…³ä¸­æ–­ (QingKe æµæ°´çº¿å»¶æ—¶) */
+    csrci   mstatus, 0x08
+    nop
+    nop
+    nop
+
+    /* ä¿å­˜çº¿ç¨‹æ ˆæŒ‡é’ˆåˆ° TCB (åç§» 8) */
     la      t0, _tx_thread_current_ptr
     lw      t1, 0(t0)
     sw      sp, 8(t1)
 
-    /* ÇĞ»»µ½ÖĞ¶ÏÕ» */
-    la      sp, _tx_irq_stack_top
+    /* ä¿å­˜å‰©ä½™æ—¶é—´ç‰‡: thread->time_slice = _tx_timer_time_slice; åè€…æ¸…é›¶ */
+    la      t0, _tx_timer_time_slice
+    lw      t3, 0(t0)
+    beqz    t3, .Lsystem_return_no_ts
+    sw      t3, 24(t1)
+    sw      zero, 0(t0)
+.Lsystem_return_no_ts:
 
-    /* Ìø×ªµ½µ÷¶ÈÆ÷ */
+    /* current = NULL, åˆ‡ç³»ç»Ÿæ ˆ, è¿›è°ƒåº¦å™¨ */
+    la      t0, _tx_thread_current_ptr
+    sw      zero, 0(t0)
+    la      t0, _tx_thread_system_stack_ptr
+    lw      sp, 0(t0)
     j       _tx_thread_schedule
 
-    .size _tx_thread_system_return, . - _tx_thread_system_return
+    .size   _tx_thread_system_return, . - _tx_thread_system_return

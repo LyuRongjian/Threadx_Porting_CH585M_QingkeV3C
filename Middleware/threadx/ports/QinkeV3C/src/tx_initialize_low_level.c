@@ -1,113 +1,60 @@
 /***************************************************************************
- * tx_initialize_low_level.c �� CH585 �ײ��ʼ��
+ * tx_initialize_low_level.c -- ThreadX 底层初始化 (QingKe V3C / CH58x)
  *
- * �ο� WCH �ٷ� FreeRTOS/RT-Thread ��ֲ:
- * - Ӳ��ѹջĬ�Ͽ��� (HWSTKEN=1)
- * - �ж�Ƕ��Ĭ�Ϲر� (INESTEN=0)
- * - mscratch �������жϴ���ʹ��
- * - �����ж�ջ
- * - ������ռ���ȼ� (bit7)
- * - SysTick �������
+ * 由 _tx_initialize_kernel_enter 调用, 职责 (对齐官方 risc-v 移植):
+ *   1. 保存系统栈指针: 复用 main 启动栈 (_eusrstack 向下) 作为
+ *      调度循环与中断处理使用的系统栈;
+ *   2. 记录首个空闲内存地址 (_end, .bss 结束) 供 tx_application_define;
+ *   3. 配置 SysTick 周期中断 (HCLK, 自动重装), 使能 PFIC SysTick;
+ *   4. SysTick / SWI 设为非抢占优先级 (IPRIOR bit7=1),
+ *      禁止硬件中断嵌套, 嵌套统一由移植层 system_state 计数管理。
+ *
+ * 注意: 不在此调用任何内核内部初始化 (定时器链表等由内核自行完成)。
+ * 向量表 (mtvec, 绝对地址模式) 与 HPE 硬件压栈 (INTSYSCR) 均由
+ * 启动文件 startup_CH585.S 配置。
  ***************************************************************************/
 
 #include "tx_api.h"
-#include "tx_port.h"
+#include "tx_initialize.h"
+#include "tx_thread.h"
 
-/* ==================== ����ջ���� ==================== */
-/* ϵͳջ: ������ʹ�� */
-static UCHAR _tx_system_stack[4096] __attribute__((aligned(8)));
-
-/* �ж�ջ: �����жϴ���ʹ�� (WCH �ٷ�ģʽ) */
-static UCHAR _tx_irq_stack[4096] __attribute__((aligned(8)));
-
-/* ȫ�ֱ��� (�������) */
-ULONG _tx_thread_system_stack_ptr;
-ULONG _tx_irq_stack_top;
-
-/* ==================== �ⲿ���� ==================== */
-extern void _tx_timer_initialize(VOID);
-
-/* ϵͳʱ��Ƶ�� */
-#ifndef SYSTEM_CORE_CLOCK
-#define SYSTEM_CORE_CLOCK               60000000UL  /* 60MHz */
-#endif
+/* 链接脚本 Link.ld: .bss 结束 (PROVIDE _end) */
+extern CHAR _end[];
 
 /***************************************************************************
  * _tx_initialize_low_level
  ***************************************************************************/
-void _tx_initialize_low_level(VOID)
+VOID  _tx_initialize_low_level(VOID)
 {
-    /* ===== 1. ��ʼ��ջָ�� ===== */
-    _tx_thread_system_stack_ptr =
-        (ULONG)(_tx_system_stack + sizeof(_tx_system_stack));
+    ULONG  sp_now;
+    ULONG  reload;
 
-    _tx_irq_stack_top =
-        (ULONG)(_tx_irq_stack + sizeof(_tx_irq_stack));
+    /* 1. 保存系统栈指针 (当前 main 栈位置, 之下空间供内核/中断使用) */
+    __asm__ volatile ("mv %0, sp" : "=r"(sp_now));
+    _tx_thread_system_stack_ptr = (VOID *)sp_now;
 
-    /* ===== 2. ���� intsyscr (CSR 0x804) ===== */
-    /*
-     * HWSTKEN  = 1  (ʹ��Ӳ��ѹջ)
-     * INESTEN  = 0  (�ر��ж�Ƕ��, WCH�ٷ�Ĭ��)
-     * GIHWSTKNEN = 0 (��ʼ���ر�)
-     * PMTCFG   = 00
-     */
-    __asm__ volatile(
-        "li     t0, 0x01\n"            /* �� HWSTKEN=1 */
-        "csrw   0x804, t0\n"
-        "fence.i\n"
-        ::: "t0", "memory"
-    );
+    /* 2. 首个空闲内存地址 */
+    _tx_initialize_unused_memory = (VOID *)_end;
 
-    /* ===== 3. ���� mtvec ===== */
-    /*
-     * V3C: mtvec[1:0] = 0b11 (���Ե�ַ������)
-     */
-    __asm__ volatile(
-        "la     t0, _interrupt_vector_table\n"
-        "ori    t0, t0, 0x3\n"
-        "csrw   mtvec, t0\n"
-        "fence.i\n"
-        ::: "t0", "memory"
-    );
-
-    /* ===== 4. ���� SysTick ===== */
-    STK_CTLR = 0;                       /* ��ֹͣ */
+    /* 3. 配置 SysTick (先停再配, 保证首个 tick 在一个完整周期后到来,
+     *    此时内核初始化已全部完成) */
+    STK_CTLR = 0;
     STK_CNTL = 0;
-    STK_CNTH = 0;
+    STK_SR   = 0;
 
-    /* �Ƚ�ֵ = ϵͳʱ�� / tickƵ�� - 1 */
-    ULONG reload = (SYSTEM_CORE_CLOCK / TX_TIMER_TICKS_PER_SECOND) - 1;
-    STK_CMPLR = reload & 0xFFFFFFFF;
-    STK_CMPHR = (reload >> 32) & 0xFFFFFFFF;
+    reload = (TX_PORT_SYSTICK_HZ / TX_TIMER_TICKS_PER_SECOND) - 1;
+    STK_CMPLR = reload;
 
-    /* ʹ��: STE + STIE + STCLK(HCLK) + STRE(�Զ�����) */
-    STK_CTLR = STK_CTLR_STE | STK_CTLR_STIE |
-               STK_CTLR_STCLK | STK_CTLR_STRE;
+    /* 4. 非抢占优先级 (bit7=1): 禁止硬件中断嵌套, 嵌套统一由
+     *    移植层 system_state 计数管理 */
+    PFIC_IPRIOR(12) = 0x80;                    /* SysTick */
+    PFIC_IPRIOR(14) = 0x80;                    /* SWI (未使用) */
 
-    /* ===== 5. �����ж����ȼ� (����, bit7) ===== */
-    /*
-     * WCH �ٷ�: CH585 ����������ռ���ȼ�
-     * bit7=0: ����ռ���ȼ� (Ĭ��)
-     * bit7=1: ����ռ���ȼ�
-     *
-     * ����:
-     * - SysTick(12): �����ȼ� (0x00) �� ��֤tick����ʧ
-     * - SW(14):      �����ȼ� (0x80) �� �������л��ɱ������жϴ��
-     * - �ⲿ(16+):   �����ȼ� (0x00) �� ������Ӧ
-     */
-    PFIC_IPRIOR(SYSTICK_IRQn) = 0x00;   /* �����ȼ� */
-    PFIC_IPRIOR(SW_IRQn)      = 0x80;   /* �����ȼ� */
+    /* 5. 启动 SysTick: 计数使能 + 中断使能 + HCLK + 自动重装 */
+    STK_CTLR = STK_CTLR_STE | STK_CTLR_STIE | STK_CTLR_STCLK | STK_CTLR_STRE;
 
-    for (int i = EXTERNAL_IRQ_BASE; i < 256; i++) {
-        PFIC_IPRIOR(i) = 0x00;          /* �����ȼ� */
-    }
+    /* 6. PFIC 使能 SysTick (IENR 写 1 置位) */
+    PFIC_IENR0 = (1UL << 12);
 
-    /* ===== 6. ʹ�� SysTick �������ж� ===== */
-    PFIC_IENR0 = (1UL << SYSTICK_IRQn) | (1UL << SW_IRQn);
-
-    /* fence.i ͬ�� */
-    __asm__ volatile("fence.i" ::: "memory");
-
-    /* ===== 7. ��ʼ�� ThreadX ��ʱ�� ===== */
-    _tx_timer_initialize();
+    __asm__ volatile ("fence.i" ::: "memory");
 }

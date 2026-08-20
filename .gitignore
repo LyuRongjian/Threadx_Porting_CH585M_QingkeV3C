@@ -1,0 +1,4 @@
+Middleware/threadx/ports/risc-v32/*
+Middleware/threadx/ports/risc-v64/*
+obj*
+Examples/*

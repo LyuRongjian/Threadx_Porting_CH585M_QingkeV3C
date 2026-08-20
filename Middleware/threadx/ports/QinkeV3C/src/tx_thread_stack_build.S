@@ -1,11 +1,12 @@
 /***************************************************************************
- * tx_thread_stack_build.S ¡ª ¹¹½¨Ïß³Ì³õÊ¼Õ»Ö¡
+ * tx_thread_stack_build.S -- æ„å»ºçº¿ç¨‹åˆå§‹æ ˆå¸§ (QingKe V3C / CH58x, HPE)
  *
- * ´´½¨"ÖĞ¶ÏÕ»Ö¡"¸ñÊ½ (ÓëÓ²¼şÑ¹Õ»¼æÈİ):
- * [Èí¼şÖ¡: 18 words] + [Ó²¼şÖ¡: 16 words]
+ * æ–°çº¿ç¨‹ä»¥"ä¸­æ–­å¸§"å½¢å¼é¦–æ¬¡å¯åŠ¨:
+ *   [è½¯å¸§ 16 å­—: ç±»å‹=1 / s0-s11=0 / mstatus=0x1880 / mepc=å…¥å£å‡½æ•°]
+ *   [ä¼ª HPE å¸§ 16 å­—: å…¨ 0, ä¾› mret ç¡¬ä»¶å¼¹å‡ºå¹¶å¾—åˆ°å¹²å‡€å¯„å­˜å™¨]
  *
- * ÊäÈë: a0 = thread_ptr, a1 = function_ptr
- * Êä³ö: a0 = ³õÊ¼Õ»Ö¸Õë
+ * å…¥å£: a0 = thread_ptr, a1 = function_ptr (å³ _tx_thread_shell_entry)
+ * å‡ºå£: æ—  (ç»“æœå†™å…¥ TCB->tx_thread_stack_ptr, åç§» 8)
  ***************************************************************************/
 
     .section .text
@@ -14,74 +15,55 @@
     .type   _tx_thread_stack_build, @function
 
 _tx_thread_stack_build:
-    /* »ñÈ¡Õ»¶¥²¢4×Ö½Ú¶ÔÆë */
-    lw      t0, 12(a0)                  /* tx_thread_stack_end */
-    andi    t0, t0, ~3
 
-    /* ·ÖÅä: Èí¼şÖ¡(18) + Ó²¼şÖ¡(16) = 34 words = 136 bytes */
-    addi    t0, t0, -(34 * 4)
+    /* å–æ ˆåº• (tx_thread_stack_end, åç§» 16), 16 å­—èŠ‚å¯¹é½ */
+    lw      t0, 16(a0)
+    li      t1, ~15
+    and     t0, t0, t1
 
-    /* ==== Ìî³äÈí¼şÖ¡ (µÍµØÖ·, offset 0-17) ==== */
+    /* é¢„ç•™ è½¯å¸§(64) + ä¼ªHPEå¸§(64) */
+    addi    t0, t0, -128
+
+    /* ==== è½¯å¸§ ==== */
     li      t1, 1
-    sw      t1, 0*4(t0)                /* frame_type = INTERRUPT */
+    sw      t1,  0x00(t0)                         /* å¸§ç±»å‹ = 1 (ä¸­æ–­) */
+    sw      zero, 0x04(t0)                        /* ä¿ç•™ */
+    sw      zero, 0x08(t0)                        /* s0 */
+    sw      zero, 0x0C(t0)                        /* s1 */
+    sw      zero, 0x10(t0)                        /* s2 */
+    sw      zero, 0x14(t0)                        /* s3 */
+    sw      zero, 0x18(t0)                        /* s4 */
+    sw      zero, 0x1C(t0)                        /* s5 */
+    sw      zero, 0x20(t0)                        /* s6 */
+    sw      zero, 0x24(t0)                        /* s7 */
+    sw      zero, 0x28(t0)                        /* s8 */
+    sw      zero, 0x2C(t0)                        /* s9 */
+    sw      zero, 0x30(t0)                        /* s10 */
+    sw      zero, 0x34(t0)                        /* s11 */
+    li      t1, 0x1880                            /* MPP=Machine, MPIE=1, MIE=0 */
+    sw      t1,  0x38(t0)                         /* mstatus */
+    sw      a1,   0x3C(t0)                        /* mepc = çº¿ç¨‹å…¥å£ */
 
-    /* sp_orig = Õ»¶¥ (ĞÂÏß³ÌÊ×´ÎÔËĞĞÊ±µÄsp) */
-    addi    t1, t0, 34*4
-    sw      t1, 1*4(t0)                /* sp_orig */
+    /* ==== ä¼ª HPE å¸§ (mret ç¡¬ä»¶å¼¹å‡º, å…¨ 0) ==== */
+    sw      zero, 0x40(t0)
+    sw      zero, 0x44(t0)
+    sw      zero, 0x48(t0)
+    sw      zero, 0x4C(t0)
+    sw      zero, 0x50(t0)
+    sw      zero, 0x54(t0)
+    sw      zero, 0x58(t0)
+    sw      zero, 0x5C(t0)
+    sw      zero, 0x60(t0)
+    sw      zero, 0x64(t0)
+    sw      zero, 0x68(t0)
+    sw      zero, 0x6C(t0)
+    sw      zero, 0x70(t0)
+    sw      zero, 0x74(t0)
+    sw      zero, 0x78(t0)
+    sw      zero, 0x7C(t0)
 
-    li      t1, 0
-    sw      t1, 2*4(t0)                /* tp = 0 */
-    sw      t1, 3*4(t0)                /* gp = 0 */
-
-    /* s0-s11 = 0 */
-    .rept 12
-    sw      t1, (4 + 11 - 0)*4(t0)    /* Öğ¸öÇåÁã */
-    .endr
-    /* ÊÖ¶¯Õ¹¿ª¸üÇåÎú */
-    sw      zero,  4*4(t0)             /* s11 */
-    sw      zero,  5*4(t0)             /* s10 */
-    sw      zero,  6*4(t0)             /* s9 */
-    sw      zero,  7*4(t0)             /* s8 */
-    sw      zero,  8*4(t0)             /* s7 */
-    sw      zero,  9*4(t0)             /* s6 */
-    sw      zero, 10*4(t0)             /* s5 */
-    sw      zero, 11*4(t0)             /* s4 */
-    sw      zero, 12*4(t0)             /* s3 */
-    sw      zero, 13*4(t0)             /* s2 */
-    sw      zero, 14*4(t0)             /* s1 */
-    sw      zero, 15*4(t0)             /* s0 */
-
-    /* mstatus = 0x1880 (MPP=M, MPIE=1, MIE=0) */
-    li      t1, 0x1880
-    sw      t1, 16*4(t0)
-
-    /* mepc = Ïß³ÌÈë¿Úº¯Êı */
-    sw      a1, 17*4(t0)
-
-    /* ==== Ìî³äÓ²¼şÖ¡ (¸ßµØÖ·, offset 18-33) ==== */
-    /* ra = _tx_thread_shell_entry (Ïß³ÌshellÈë¿Ú) */
-    la      t1, _tx_thread_shell_entry
-    sw      t1, (18+0)*4(t0)           /* x1(ra) */
-
-    /* ÆäÓà caller-saved = 0 */
-    sw      zero, (18+1)*4(t0)         /* x5(t0) */
-    sw      zero, (18+2)*4(t0)         /* x6(t1) */
-    sw      zero, (18+3)*4(t0)         /* x7(t2) */
-    sw      a0,   (18+4)*4(t0)         /* x10(a0) = thread_ptr */
-    sw      zero, (18+5)*4(t0)         /* x11(a1) */
-    sw      zero, (18+6)*4(t0)         /* x12(a2) */
-    sw      zero, (18+7)*4(t0)         /* x13(a3) */
-    sw      zero, (18+8)*4(t0)         /* x14(a4) */
-    sw      zero, (18+9)*4(t0)         /* x15(a5) */
-    sw      zero, (18+10)*4(t0)        /* x16(a6) */
-    sw      zero, (18+11)*4(t0)        /* x17(a7) */
-    sw      zero, (18+12)*4(t0)        /* x28(t3) */
-    sw      zero, (18+13)*4(t0)        /* x29(t4) */
-    sw      zero, (18+14)*4(t0)        /* x30(t5) */
-    sw      zero, (18+15)*4(t0)        /* x31(t6) */
-
-    /* ·µ»Ø³õÊ¼Õ»Ö¸Õë */
-    mv      a0, t0
+    /* thread_ptr->tx_thread_stack_ptr = åˆå§‹æ ˆæŒ‡é’ˆ */
+    sw      t0, 8(a0)
     ret
 
-    .size _tx_thread_stack_build, . - _tx_thread_stack_build
+    .size   _tx_thread_stack_build, . - _tx_thread_stack_build

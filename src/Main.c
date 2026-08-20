@@ -3,107 +3,91 @@
  * Author             : WCH
  * Version            : V1.0
  * Date               : 2020/08/06
- * Description        : ´®¿Ú1ÊÕ·¢ÑİÊ¾
- *********************************************************************************
- * Copyright (c) 2021 Nanjing Qinheng Microelectronics Co., Ltd.
- * Attention: This software (modified or not) and binary are used for 
- * microcontroller manufactured by Nanjing Qinheng Microelectronics.
+ * Description        : CH585 ThreadX (QingKe V3C HPE ç§»æ¤) æ¼”ç¤º:
+ *                      ä¸¤ä¸ªçº¿ç¨‹å‘¨æœŸæ€§é€šè¿‡ UART1 æ‰“å°, éªŒè¯ tick/è°ƒåº¦/ä¼‘çœ ã€‚
  *******************************************************************************/
-
 #include "CH58x_common.h"
+#include "tx_api.h"
 
-uint8_t TxBuff[] = "This is a tx exam\r\n";
-uint8_t RxBuff[100];
-uint8_t trigB;
+#define DEMO_STACK_SIZE         1024
+#define DEMO_THREAD0_PRIORITY   2
+#define DEMO_THREAD1_PRIORITY   3
+
+TX_THREAD   demo_thread_0;
+TX_THREAD   demo_thread_1;
+
+UCHAR       demo_thread_0_stack[DEMO_STACK_SIZE];
+UCHAR       demo_thread_1_stack[DEMO_STACK_SIZE];
+
+/* çº¿ç¨‹ 0: æ¯ 100 tick (1s) æ‰“å°ä¸€æ¬¡ */
+static void demo_thread_0_entry(ULONG thread_input)
+{
+    (void)thread_input;
+    while (1)
+    {
+        UART1_SendString((uint8_t *)"ThreadX CH585: thread 0\r\n", sizeof("ThreadX CH585: thread 0\r\n"));
+        tx_thread_sleep(100);
+    }
+}
+
+/* çº¿ç¨‹ 1: æ¯ 50 tick (0.5s) æ‰“å°ä¸€æ¬¡, ä¸çº¿ç¨‹ 0 å½¢æˆå‘¨æœŸåˆ‡æ¢ */
+static void demo_thread_1_entry(ULONG thread_input)
+{
+    (void)thread_input;
+    while (1)
+    {
+        UART1_SendString((uint8_t *)"ThreadX CH585: thread 1\r\n", sizeof("ThreadX CH585: thread 1\r\n"));
+        tx_thread_sleep(50);
+    }
+}
+
+/*********************************************************************
+ * @fn      tx_application_define
+ *
+ * @brief   ThreadX åº”ç”¨åˆå§‹åŒ–, tx_kernel_initialize æœŸé—´è¢«è°ƒç”¨
+ *
+ * @return  none
+ */
+void tx_application_define(void *first_unused_memory)
+{
+    (void)first_unused_memory;
+
+    tx_thread_create(&demo_thread_0, "thread 0", demo_thread_0_entry, 0,
+                     demo_thread_0_stack, DEMO_STACK_SIZE,
+                     DEMO_THREAD0_PRIORITY, DEMO_THREAD0_PRIORITY,
+                     TX_NO_TIME_SLICE, TX_AUTO_START);
+
+    tx_thread_create(&demo_thread_1, "thread 1", demo_thread_1_entry, 0,
+                     demo_thread_1_stack, DEMO_STACK_SIZE,
+                     DEMO_THREAD1_PRIORITY, DEMO_THREAD1_PRIORITY,
+                     TX_NO_TIME_SLICE, TX_AUTO_START);
+}
 
 /*********************************************************************
  * @fn      main
  *
- * @brief   Ö÷º¯Êı
+ * @brief   ä¸»å‡½æ•°: æ—¶é’Ÿ/ä¸²å£åˆå§‹åŒ–åè¿›å…¥ ThreadX å†…æ ¸
  *
- * @return  none
+ * @return  never returns
  */
-int main()
+int main(void)
 {
-    uint8_t len;
-
     HSECFG_Capacitance(HSECap_18p);
     SetSysClock(SYSCLK_FREQ);
 
-    /* ÅäÖÃ´®¿Ú1£ºÏÈÅäÖÃIO¿ÚÄ£Ê½£¬ÔÙÅäÖÃ´®¿Ú */
+    /* è°ƒè¯•ä¸²å£: UART1 (PA8=RXD, PA9=TXD) */
     GPIOA_SetBits(GPIO_Pin_9);
-    GPIOA_ModeCfg(GPIO_Pin_8, GPIO_ModeIN_PU);      // RXD-ÅäÖÃÉÏÀ­ÊäÈë
-    GPIOA_ModeCfg(GPIO_Pin_9, GPIO_ModeOut_PP_5mA); // TXD-ÅäÖÃÍÆÍìÊä³ö£¬×¢ÒâÏÈÈÃIO¿ÚÊä³ö¸ßµçÆ½
+    GPIOA_ModeCfg(GPIO_Pin_8, GPIO_ModeIN_PU);
+    GPIOA_ModeCfg(GPIO_Pin_9, GPIO_ModeOut_PP_5mA);
     UART1_DefInit();
 
-#if 1 // ²âÊÔ´®¿Ú·¢ËÍ×Ö·û´®
-    UART1_SendString(TxBuff, sizeof(TxBuff));
+    UART1_SendString((uint8_t *)"ThreadX CH585 port start\r\n", sizeof("ThreadX CH585 port start\r\n"));
 
-#endif
+    /* è¿›å…¥ ThreadX (ä¸è¿”å›) */
+    tx_kernel_enter();
 
-#if 1 // ²éÑ¯·½Ê½£º½ÓÊÕÊı¾İºó·¢ËÍ³öÈ¥
-    while(1)
+    while (1)
     {
-        len = UART1_RecvString(RxBuff);
-        if(len)
-        {
-            UART1_SendString(RxBuff, len);
-        }
-    }
-
-#endif
-
-#if 0 // ÖĞ¶Ï·½Ê½£º½ÓÊÕÊı¾İºó·¢ËÍ³öÈ¥
-    UART1_ByteTrigCfg(UART_7BYTE_TRIG);
-    trigB = 7;
-    UART1_INTCfg(ENABLE, RB_IER_RECV_RDY | RB_IER_LINE_STAT);
-    PFIC_EnableIRQ(UART1_IRQn);
-#endif
-
-    while(1);
-}
-
-/*********************************************************************
- * @fn      UART1_IRQHandler
- *
- * @brief   UART1ÖĞ¶Ïº¯Êı
- *
- * @return  none
- */
-__INTERRUPT
-__HIGH_CODE
-void UART1_IRQHandler(void)
-{
-    volatile uint8_t i;
-
-    switch(UART1_GetITFlag())
-    {
-        case UART_II_LINE_STAT: // ÏßÂ·×´Ì¬´íÎó
-        {
-            UART1_GetLinSTA();
-            break;
-        }
-
-        case UART_II_RECV_RDY: // Êı¾İ´ïµ½ÉèÖÃ´¥·¢µã
-            for(i = 0; i != trigB; i++)
-            {
-                RxBuff[i] = UART1_RecvByte();
-                UART1_SendByte(RxBuff[i]);
-            }
-            break;
-
-        case UART_II_RECV_TOUT: // ½ÓÊÕ³¬Ê±£¬ÔİÊ±Ò»Ö¡Êı¾İ½ÓÊÕÍê³É
-            i = UART1_RecvString(RxBuff);
-            UART1_SendString(RxBuff, i);
-            break;
-
-        case UART_II_THR_EMPTY: // ·¢ËÍ»º´æÇø¿Õ£¬¿É¼ÌĞø·¢ËÍ
-            break;
-
-        case UART_II_MODEM_CHG: // Ö»Ö§³Ö´®¿Ú0
-            break;
-
-        default:
-            break;
+        /* ä¸åº”åˆ°è¾¾è¿™é‡Œ */
     }
 }
