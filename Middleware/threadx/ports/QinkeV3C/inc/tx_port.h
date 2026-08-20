@@ -1,20 +1,20 @@
 /***************************************************************************
- * tx_port.h ¡ª ThreadX Port for WCH CH585 (QingKe V4C RISC-V)
+ * tx_port.h ï¿½ï¿½ ThreadX Port for WCH CH585 (QingKe V3C RISC-V)
  *
- * ²Î¿¼: openwch/ch585 EVT FreeRTOS/RT-Thread ¹Ù·½ÒÆÖ²
- * ¹Ø¼üÌØÐÔ:
- *   - Ó²¼þÑ¹Õ» (HPE) ÓÃÓÚÆÕÍ¨ÖÐ¶Ï¿ìËÙÏìÓ¦
- *   - mscratch ×÷Îª SP ÁÙÊ±¼Ä´æÆ÷ (WCH ¹Ù·½Ä£Ê½)
- *   - ¶ÀÁ¢ÖÐ¶ÏÕ»
- *   - SysTick Ê¹ÓÃ WCH-Interrupt-fast ¶ÀÁ¢Èë¿Ú
- *   - Á½¼¶ÇÀÕ¼ÓÅÏÈ¼¶ (PFIC_IPRIOR bit7)
+ * ï¿½Î¿ï¿½: openwch/ch585 EVT FreeRTOS/RT-Thread ï¿½Ù·ï¿½ï¿½ï¿½Ö²
+ * ï¿½Ø¼ï¿½ï¿½ï¿½ï¿½ï¿½:
+ *   - Ó²ï¿½ï¿½Ñ¹Õ» (HPE) ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¨ï¿½Ð¶Ï¿ï¿½ï¿½ï¿½ï¿½ï¿½Ó¦
+ *   - mscratch ï¿½ï¿½Îª SP ï¿½ï¿½Ê±ï¿½Ä´ï¿½ï¿½ï¿½ (WCH ï¿½Ù·ï¿½Ä£Ê½)
+ *   - ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶ï¿½Õ»
+ *   - SysTick Ê¹ï¿½ï¿½ WCH-Interrupt-fast ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+ *   - ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ¼ï¿½ï¿½ï¿½È¼ï¿½ (PFIC_IPRIOR bit7)
  ***************************************************************************/
 #ifndef TX_PORT_H
 #define TX_PORT_H
 
 #include <stdint.h>
 
-/* ==================== »ù±¾ÀàÐÍ ==================== */
+/* ==================== ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ==================== */
 #define VOID                                    void
 typedef char                                    CHAR;
 typedef unsigned char                           UCHAR;
@@ -27,7 +27,7 @@ typedef short                                   SHORT;
 typedef unsigned short                          USHORT;
 #define ULONG64_DEFINED
 
-/* ==================== ThreadX ÅäÖÃ ==================== */
+/* ==================== ThreadX ï¿½ï¿½ï¿½ï¿½ ==================== */
 #ifndef TX_MAX_PRIORITIES
 #define TX_MAX_PRIORITIES                       32
 #endif
@@ -48,29 +48,29 @@ typedef unsigned short                          USHORT;
 #define TX_TIMER_TICKS_PER_SECOND               1000
 #endif
 
-/* ==================== QingKe V4C / CH585 Ó²¼þ¶¨Òå ==================== */
+/* ==================== QingKe V3C / CH585 Ó²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ==================== */
 
-/* PFIC »ùµØÖ· */
+/* PFIC ï¿½ï¿½ï¿½ï¿½Ö· */
 #define PFIC_BASE                               0xE000E000UL
 
-/* PFIC ÖÐ¶ÏÊ¹ÄÜ¼Ä´æÆ÷ */
+/* PFIC ï¿½Ð¶ï¿½Ê¹ï¿½Ü¼Ä´ï¿½ï¿½ï¿½ */
 #define PFIC_IENR0                              (*(volatile ULONG *)(PFIC_BASE + 0x100))
 #define PFIC_IENR1                              (*(volatile ULONG *)(PFIC_BASE + 0x104))
 #define PFIC_IENR2                              (*(volatile ULONG *)(PFIC_BASE + 0x108))
 #define PFIC_IENR3                              (*(volatile ULONG *)(PFIC_BASE + 0x10C))
 
-/* PFIC ÖÐ¶Ï¹ÒÆð/Çå³ý */
+/* PFIC ï¿½Ð¶Ï¹ï¿½ï¿½ï¿½/ï¿½ï¿½ï¿½ */
 #define PFIC_IPSR0                              (*(volatile ULONG *)(PFIC_BASE + 0x200))
 #define PFIC_IPRR0                              (*(volatile ULONG *)(PFIC_BASE + 0x280))
 
-/* PFIC ÏµÍ³¿ØÖÆ */
+/* PFIC ÏµÍ³ï¿½ï¿½ï¿½ï¿½ */
 #define PFIC_SCTLR                              (*(volatile ULONG *)(PFIC_BASE + 0xD10))
 
-/* PFIC ÖÐ¶ÏÓÅÏÈ¼¶ (Ã¿ÖÐ¶Ï1×Ö½Ú, bit7=ÇÀÕ¼ÓÅÏÈ¼¶) */
+/* PFIC ï¿½Ð¶ï¿½ï¿½ï¿½ï¿½È¼ï¿½ (Ã¿ï¿½Ð¶ï¿½1ï¿½Ö½ï¿½, bit7=ï¿½ï¿½Õ¼ï¿½ï¿½ï¿½È¼ï¿½) */
 #define PFIC_IPRIOR_BASE                        (PFIC_BASE + 0x400)
 #define PFIC_IPRIOR(n)                          (*(volatile UCHAR *)(PFIC_IPRIOR_BASE + (n)))
 
-/* SysTick ¼Ä´æÆ÷ (QingKe V3B/V4C) */
+/* SysTick ï¿½Ä´ï¿½ï¿½ï¿½ (QingKe V3C) */
 #define STK_CTLR                                (*(volatile ULONG *)0xE000F000)
 #define STK_SR                                  (*(volatile ULONG *)0xE000F004)
 #define STK_CNTL                                (*(volatile ULONG *)0xE000F008)
@@ -78,35 +78,35 @@ typedef unsigned short                          USHORT;
 #define STK_CMPLR                               (*(volatile ULONG *)0xE000F010)
 #define STK_CMPHR                               (*(volatile ULONG *)0xE000F014)
 
-/* SysTick ¿ØÖÆÎ» */
-#define STK_CTLR_STE                            (1UL << 0)    /* ¼ÆÊýÆ÷Ê¹ÄÜ */
-#define STK_CTLR_STIE                           (1UL << 1)    /* ÖÐ¶ÏÊ¹ÄÜ */
-#define STK_CTLR_STCLK                          (1UL << 2)    /* 1=HCLK, 0=Íâ²¿Ê±ÖÓ */
-#define STK_CTLR_STRE                           (1UL << 3)    /* ×Ô¶¯ÖØ×°ÔØ */
-#define STK_CTLR_MODE                           (1UL << 4)    /* 1=ÏòÏÂ¼ÆÊý */
+/* SysTick ï¿½ï¿½ï¿½ï¿½Î» */
+#define STK_CTLR_STE                            (1UL << 0)    /* ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½ï¿½ */
+#define STK_CTLR_STIE                           (1UL << 1)    /* ï¿½Ð¶ï¿½Ê¹ï¿½ï¿½ */
+#define STK_CTLR_STCLK                          (1UL << 2)    /* 1=HCLK, 0=ï¿½â²¿Ê±ï¿½ï¿½ */
+#define STK_CTLR_STRE                           (1UL << 3)    /* ï¿½Ô¶ï¿½ï¿½ï¿½×°ï¿½ï¿½ */
+#define STK_CTLR_MODE                           (1UL << 4)    /* 1=ï¿½ï¿½ï¿½Â¼ï¿½ï¿½ï¿½ */
 
-/* STK_SR Î»¶¨Òå */
-#define STK_SR_CNTIF                            (1UL << 0)    /* ¼ÆÊýÖÐ¶Ï±êÖ¾ */
-#define STK_SR_SWIE                             (1UL << 31)   /* Èí¼þÖÐ¶ÏÊ¹ÄÜ/´¥·¢ */
+/* STK_SR Î»ï¿½ï¿½ï¿½ï¿½ */
+#define STK_SR_CNTIF                            (1UL << 0)    /* ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶Ï±ï¿½Ö¾ */
+#define STK_SR_SWIE                             (1UL << 31)   /* ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶ï¿½Ê¹ï¿½ï¿½/ï¿½ï¿½ï¿½ï¿½ */
 
-/* intsyscr CSR (0x804) Î»¶¨Òå */
-#define INTSYSCR_HWSTKEN                        (1UL << 0)    /* Ó²¼þÑ¹Õ»Ê¹ÄÜ */
-#define INTSYSCR_INESTEN                        (1UL << 1)    /* ÖÐ¶ÏÇ¶Ì×Ê¹ÄÜ */
-#define INTSYSCR_GIHWSTKNEN                     (1UL << 5)    /* È«¾Ö½ûÖ¹Ó²¼þ³öÕ»(mret) */
+/* intsyscr CSR (0x804) Î»ï¿½ï¿½ï¿½ï¿½ */
+#define INTSYSCR_HWSTKEN                        (1UL << 0)    /* Ó²ï¿½ï¿½Ñ¹Õ»Ê¹ï¿½ï¿½ */
+#define INTSYSCR_INESTEN                        (1UL << 1)    /* ï¿½Ð¶ï¿½Ç¶ï¿½ï¿½Ê¹ï¿½ï¿½ */
+#define INTSYSCR_GIHWSTKNEN                     (1UL << 5)    /* È«ï¿½Ö½ï¿½Ö¹Ó²ï¿½ï¿½ï¿½ï¿½Õ»(mret) */
 
-/* ÖÐ¶ÏºÅ */
+/* ï¿½Ð¶Ïºï¿½ */
 #define SYSTICK_IRQn                            12
 #define SW_IRQn                                 14
 #define EXTERNAL_IRQ_BASE                       16
 
-/* Õ»Ö¡ÀàÐÍ±ê¼Ç */
+/* Õ»Ö¡ï¿½ï¿½ï¿½Í±ï¿½ï¿½ */
 #define FRAME_TYPE_SOLICITED                    0
 #define FRAME_TYPE_INTERRUPT                    1
 
-/* Ó²¼þÑ¹Õ»´óÐ¡: 16 regs ¡Á 4 bytes = 64 bytes */
+/* Ó²ï¿½ï¿½Ñ¹Õ»ï¿½ï¿½Ð¡: 16 regs ï¿½ï¿½ 4 bytes = 64 bytes */
 #define HW_FRAME_SIZE                           64
 
-/* ==================== ÖÐ¶Ï¿ØÖÆºê ==================== */
+/* ==================== ï¿½Ð¶Ï¿ï¿½ï¿½Æºï¿½ ==================== */
 #define TX_INT_DISABLE                          0x00000000
 #define TX_INT_ENABLE                           0x00000008
 
@@ -127,14 +127,14 @@ typedef unsigned short                          USHORT;
         );                                      \
     }
 
-/* ==================== ´¥·¢ÉÏÏÂÎÄÇÐ»» ==================== */
-/* Í¨¹ý´¥·¢Èí¼þÖÐ¶Ï (SW_IRQn=14) ÊµÏÖÉÏÏÂÎÄÇÐ»» */
+/* ==================== ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð»ï¿½ ==================== */
+/* Í¨ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶ï¿½ (SW_IRQn=14) Êµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð»ï¿½ */
 #define TX_PORT_TRIGGER_CONTEXT_SWITCH()        \
     do {                                        \
         STK_SR |= STK_SR_SWIE;                 \
     } while(0)
 
-/* ==================== À©Õ¹¶¨Òå ==================== */
+/* ==================== ï¿½ï¿½Õ¹ï¿½ï¿½ï¿½ï¿½ ==================== */
 #define TX_THREAD_EXTENSION_0
 #define TX_THREAD_EXTENSION_1
 #define TX_THREAD_EXTENSION_2
@@ -164,11 +164,11 @@ typedef unsigned short                          USHORT;
 #undef TX_DISABLE_STACK_FILLING
 #endif
 
-/* ==================== °æ±¾±êÊ¶ ==================== */
+/* ==================== ï¿½æ±¾ï¿½ï¿½Ê¶ ==================== */
 #ifndef __ASSEMBLER__
 #ifdef TX_THREAD_INIT
 CHAR _tx_version_id[] =
-    "(c) 2024 Microsoft Corp. ThreadX QingKe V4C/CH585 Port (WCH-style)";
+    "(c) 2024 Microsoft Corp. ThreadX QingKe V3C/CH585 Port (WCH-style)";
 #else
 extern CHAR _tx_version_id[];
 #endif

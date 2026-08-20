@@ -1,39 +1,39 @@
 /***************************************************************************
- * qingke_vectors.S — QingKe V4C 中断向量表
+ * qingke_vectors.S 锟斤拷 QingKe V3C 锟叫讹拷锟斤拷锟斤拷锟斤拷
  *
- * V4C 向量表: mtvec[1:0] = 0b11 (绝对地址模式)
- * 每个条目为 32 位函数指针
+ * V3C 锟斤拷锟斤拷锟斤拷: mtvec[1:0] = 0b11 (锟斤拷锟皆碉拷址模式)
+ * 每锟斤拷锟斤拷目为 32 位锟斤拷锟斤拷指锟斤拷
  *
- * 参考: WCH 官方 FreeRTOS 移植
- * - SysTick(12): 独立 WCH-Interrupt-fast 入口 (不走统一入口)
- * - SW中断(14):  上下文切换专用入口
- * - 外部中断(16+): 统一中断入口
+ * 锟轿匡拷: WCH 锟斤拷锟斤拷锟斤拷 FreeRTOS 锟斤拷植
+ * - SysTick(12): 锟斤拷锟斤拷 WCH-Interrupt-fast 锟斤拷锟? (锟斤拷锟斤拷统一锟斤拷锟?)
+ * - SW锟叫讹拷(14):  锟斤拷锟斤拷锟斤拷锟叫伙拷专锟斤拷锟斤拷锟?
+ * - 锟解部锟叫讹拷(16+): 统一锟叫讹拷锟斤拷锟?
  ***************************************************************************/
 
     .section .interrupt_vector, "aw", @progbits
-    .align 10                               /* 1024字节对齐 */
+    .align 10                               /* 1024锟街节讹拷锟斤拷 */
     .global _interrupt_vector_table
     .type   _interrupt_vector_table, @object
 
 _interrupt_vector_table:
-    /* 0-11: 保留 → HardFault */
+    /* 0-11: 锟斤拷锟斤拷 锟斤拷 HardFault */
     .rept 12
     .word   _hardfault_handler
     .endr
 
-    /* 12: SysTick — 独立快速入口 (WCH-Interrupt-fast) */
+    /* 12: SysTick 锟斤拷 锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟? (WCH-Interrupt-fast) */
     .word   _tx_systick_handler
 
-    /* 13: 保留 */
+    /* 13: 锟斤拷锟斤拷 */
     .word   _hardfault_handler
 
-    /* 14: 软件中断 — 上下文切换 */
+    /* 14: 锟斤拷锟斤拷锟叫讹拷 锟斤拷 锟斤拷锟斤拷锟斤拷锟叫伙拷 */
     .word   _tx_context_switch_isr
 
-    /* 15: 保留 */
+    /* 15: 锟斤拷锟斤拷 */
     .word   _hardfault_handler
 
-    /* 16-255: 外部中断 → 统一入口 */
+    /* 16-255: 锟解部锟叫讹拷 锟斤拷 统一锟斤拷锟? */
     .rept 240
     .word   _tx_unified_interrupt_entry
     .endr
