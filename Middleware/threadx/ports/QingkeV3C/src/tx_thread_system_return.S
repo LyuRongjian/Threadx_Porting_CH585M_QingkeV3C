@@ -12,8 +12,10 @@
 
 _tx_thread_system_return:
 
-    /* 先关中断，尽早消除与中断入口/退出的竞态窗口 */
-    csrci   mstatus, 0x08
+    /* 原子保存调用前的中断状态并关闭 MIE。
+       主动帧恢复时必须恢复调用前的 mstatus；若先关中断再读取，
+       所有经调度器恢复的线程都会带着 MIE=0 返回。 */
+    csrrci  t0, mstatus, 0x08
     nop
     nop
     nop
@@ -21,7 +23,6 @@ _tx_thread_system_return:
     /* 构建主动栈帧 (16 字) */
     addi    sp, sp, -64
     sw      zero, 0(sp)                           /* 帧类型 = 0 (主动) */
-    csrr    t0, mstatus
     sw      t0, 0x38(sp)                          /* 先保存 mstatus (含 MIE 原状态) */
     sw      ra,  0x04(sp)
     sw      s0,  0x08(sp)

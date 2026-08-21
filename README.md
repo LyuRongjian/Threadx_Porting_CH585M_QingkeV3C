@@ -174,11 +174,14 @@ QingkeV3C/
 
 线程调用阻塞服务（如 `tx_thread_sleep`）时由内核调用：
 
-1. 构建 64B 主动帧（类型 = 0，ra，s0-s11，mstatus）
-2. `csrci mstatus, 0x08` + 3 NOP 关中断
-3. 保存 sp 到 TCB 偏移 8，保存剩余时间片
-4. 清 `current_ptr`，切系统栈
-5. `j _tx_thread_schedule`
+1. 使用 `csrrci t0, mstatus, 0x08` 原子保存调用前的 mstatus 并关闭 MIE
+2. 补 3 个 NOP，等待 QingKe 三级流水线确认 MIE 生效
+3. 构建 64B 主动帧（类型 = 0，ra，s0-s11，保存的原始 mstatus）
+4. 保存 sp 到 TCB 偏移 8，保存剩余时间片
+5. 清 `current_ptr`，切系统栈
+
+主动帧必须保存**调用前**的 mstatus。如果先关闭 MIE 再读取 mstatus，调度器恢复线程时会把 MIE=0 写回，导致线程恢复后中断保持关闭，进而出现 tick 和调度时序异常。
+6. `j _tx_thread_schedule`
 
 ### 调度器 — `_tx_thread_schedule`
 
@@ -421,7 +424,9 @@ RAM (0x20000000, 128KB):
 
 ## 测试程序
 
-`src/Main.c` 包含 21 组综合测试（test_thread，优先级 15，TX_AUTO_START），方法对齐官方 `Examples/threadx/test/tx/regression` 回归套件：
+`src/Main.c` 包含 21 组板级综合测试（test_thread，优先级 15，TX_AUTO_START）。这些测试借鉴官方 `Examples/threadx/test/tx/regression` 的测试分类，但不是官方完整回归套件的替代品。
+
+官方套件包含约 100 个独立测试，覆盖更多错误参数、对象删除、挂起超时、线程终止、优先级排序、信息查询和多种 ISR 组合。当前测试重点验证 CH585 移植最关键的上下文切换、中断分发、同步对象和定时器路径。
 
 | # | 测试项 | # | 测试项 |
 |---|--------|---|--------|
@@ -437,7 +442,18 @@ RAM (0x20000000, 128KB):
 | 10 | 块内存池 | 21 | **定时器精度**（单次/周期到期 tick 精度 + 停止后不再到期） |
 | 11 | 软件定时器 |  |  |
 
-测试完成后输出 PASS/FAIL 汇总，21 组测试会按顺序全部执行并报告 PASS/FAIL 统计。
+测试完成后输出 PASS/FAIL 汇总，21 组测试会按顺序全部执行并报告统计。
+
+### 测试同步原则
+
+测试代码不再使用固定 tick 推断线程是否已经运行或进入等待状态：
+
+- 线程入口通过信号量报告“已开始执行”；
+- relinquish、抢占阈值和恢复测试通过完成信号量报告实际进度；
+- wait-abort、队列阻塞和延迟挂起使用明确的对象状态或握手确认；
+- `sleep(5/20/25/35)` 等固定 tick 仅用于真实的时间流逝、时间片和定时器精度测试。
+
+因此，`sleep(1)` 在这些测试中表示真实的一个系统 tick，不再被当作通用的线程启动等待机制。
 
 **用户 ISR 编写要点**（重要）：经 `unified_interrupt_entry` 分发的外设 ISR 必须是**普通 C 函数 + `__HIGH_CODE`**，**不可加 `__INTERRUPT` 属性**——该属性（WCH-Interrupt-fast）依赖 HPE 且以 `mret` 返回，仅适用于直接入口向量（如 LLE）。统一入口已保存全量上下文并以 `jalr` 普通调用进入用户 ISR。参考 `src/Main.c` 的 `TMR0_IRQHandler`。
 

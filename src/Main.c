@@ -189,6 +189,7 @@ static volatile ULONG preempt_low_counter;
 static volatile ULONG preempt_high_counter;
 static volatile ULONG preempt_high_ran;
 static volatile ULONG preempt_low_started;
+static TX_SEMAPHORE preempt_low_started_sem;
 
 static void preempt_low_entry(ULONG p)
 {
@@ -196,6 +197,7 @@ static void preempt_low_entry(ULONG p)
 
     /* 标记低优先级线程已开始运行 */
     preempt_low_started = 1;
+    tx_semaphore_put(&preempt_low_started_sem);
     preempt_low_counter++;
 
     /* 忙等, 等待高优先级线程抢占 */
@@ -228,6 +230,9 @@ static void test_thread_preemption(void)
     preempt_high_ran = 0;
     preempt_low_started = 0;
 
+    status = tx_semaphore_create(&preempt_low_started_sem, "preempt_started", 0);
+    TEST_CHECK("preempt: start semaphore", status == TX_SUCCESS);
+
     /* 低优先级线程: 不自动启动 */
     status = tx_thread_create(&preempt_low, "preempt_low", preempt_low_entry, 0,
                               preempt_low_stack, TEST_STACK_SIZE,
@@ -243,8 +248,9 @@ static void test_thread_preemption(void)
     /* 先恢复低优先级线程, 但它不会立即运行 (优先级低于 test_thread) */
     tx_thread_resume(&preempt_low);
 
-    /* 睡眠 1 tick 让低优先级线程开始运行 */
-    tx_thread_sleep(3);
+    /* 等待低优先级线程主动报告已进入入口。 */
+    status = tx_semaphore_get(&preempt_low_started_sem, TX_WAIT_FOREVER);
+    TEST_CHECK("preempt: start handshake", status == TX_SUCCESS);
 
     /* 确认低优先级线程已启动 */
     TEST_CHECK("preempt: low started", preempt_low_started != 0);
@@ -257,7 +263,7 @@ static void test_thread_preemption(void)
      * 此检查必须在 resume(high) 之前 —— 高线程一旦运行会置
      * preempt_high_ran=1, 低线程循环条件随即为假而退出, 之后
      * 不再自增。放在此处 (ran 恒为 0) 才是确定性的。 */
-    tx_thread_sleep(3);
+    tx_thread_sleep(1);
     TEST_CHECK("preempt: low was running", preempt_low_counter > low_count_before);
 
     /* 恢复高优先级线程, 应立即抢占低优先级线程 */
@@ -268,7 +274,7 @@ static void test_thread_preemption(void)
     /* 由于高优先级线程会立即抢占, 恢复后 test_thread 被挂起,
        高优先级运行完毕后, 低优先级继续, 然后低优先级退出,
        最后 test_thread 恢复执行 */
-    tx_thread_sleep(2);
+    tx_thread_sleep(1);
 
     TEST_CHECK("preempt: high ran", preempt_high_ran != 0);
     TEST_CHECK("preempt: high counter", preempt_high_counter >= 1);
@@ -278,6 +284,7 @@ static void test_thread_preemption(void)
     tx_thread_terminate(&preempt_high);
     tx_thread_delete(&preempt_low);
     tx_thread_delete(&preempt_high);
+    tx_semaphore_delete(&preempt_low_started_sem);
 }
 
 /* ========================================================================
@@ -345,13 +352,22 @@ static void test_time_slice(void)
  *  测试 4: 线程挂起/恢复
  * ======================================================================== */
 static volatile ULONG suspend_counter;
+static TX_SEMAPHORE suspend_started_sem;
+static TX_SEMAPHORE suspend_resumed_sem;
+static volatile ULONG suspend_resume_requested;
 
 static void suspend_entry(ULONG p)
 {
     (void)p;
+    tx_semaphore_put(&suspend_started_sem);
     while (1)
     {
         suspend_counter++;
+        if (suspend_resume_requested)
+        {
+            suspend_resume_requested = 0;
+            tx_semaphore_put(&suspend_resumed_sem);
+        }
         tx_thread_sleep(1);
     }
 }
@@ -366,20 +382,27 @@ static void test_suspend_resume(void)
     uart_puts("\r\n[Test 4] Thread Suspend/Resume\r\n");
 
     suspend_counter = 0;
+    suspend_resume_requested = 0;
+
+    status = tx_semaphore_create(&suspend_started_sem, "suspend_started", 0);
+    TEST_CHECK("suspend: start semaphore", status == TX_SUCCESS);
+    status = tx_semaphore_create(&suspend_resumed_sem, "suspend_resumed", 0);
+    TEST_CHECK("suspend: resume semaphore", status == TX_SUCCESS);
 
     status = tx_thread_create(&suspend_thread, "suspend", suspend_entry, 0,
                               suspend_stack, TEST_STACK_SIZE,
                               12, 12, TX_NO_TIME_SLICE, TX_AUTO_START);
     TEST_CHECK("suspend: create", status == TX_SUCCESS);
 
-    tx_thread_sleep(3);
+    status = tx_semaphore_get(&suspend_started_sem, TX_WAIT_FOREVER);
+    TEST_CHECK("suspend: start handshake", status == TX_SUCCESS);
     ULONG count_before_suspend = suspend_counter;
 
     /* 挂起 */
     status = tx_thread_suspend(&suspend_thread);
     TEST_CHECK("suspend: status", status == TX_SUCCESS);
 
-    tx_thread_sleep(3);
+    tx_thread_sleep(1);
     ULONG count_after_suspend = suspend_counter;
 
     /* 挂起后计数不应增加 */
@@ -389,7 +412,9 @@ static void test_suspend_resume(void)
     status = tx_thread_resume(&suspend_thread);
     TEST_CHECK("resume: status", status == TX_SUCCESS);
 
-    tx_thread_sleep(3);
+    suspend_resume_requested = 1;
+    status = tx_semaphore_get(&suspend_resumed_sem, TX_WAIT_FOREVER);
+    TEST_CHECK("resume: handshake", status == TX_SUCCESS);
     ULONG count_after_resume = suspend_counter;
 
     /* 恢复后计数应增加 */
@@ -397,6 +422,8 @@ static void test_suspend_resume(void)
 
     tx_thread_terminate(&suspend_thread);
     tx_thread_delete(&suspend_thread);
+    tx_semaphore_delete(&suspend_started_sem);
+    tx_semaphore_delete(&suspend_resumed_sem);
 }
 
 /* ========================================================================
@@ -1156,11 +1183,13 @@ extern TX_THREAD      _tx_timer_thread;
 static TX_THREAD      cy_t;
 static UCHAR          cy_stack[TEST_STACK_SIZE];
 static volatile ULONG cy_flag;
+static TX_SEMAPHORE   cy_started_sem;
 
 static void cy_entry(ULONG p)
 {
     (void)p;
     cy_flag = 1;
+    tx_semaphore_put(&cy_started_sem);
     tx_thread_suspend(&cy_t);
 }
 
@@ -1168,15 +1197,22 @@ static void canary_check(const char *tag)
 {
     UINT status;
     cy_flag = 0;
+    status = tx_semaphore_create(&cy_started_sem, "cy_started", 0);
+    if (status != TX_SUCCESS)
+    {
+        uart_puts("  [canary] semaphore FAIL\r\n");
+        return;
+    }
     status = tx_thread_create(&cy_t, "cy", cy_entry, 0, cy_stack, TEST_STACK_SIZE,
                               20, 20, TX_NO_TIME_SLICE, TX_DONT_START);
     if (status != TX_SUCCESS)
     {
         uart_puts("  [canary] create FAIL\r\n");
+        tx_semaphore_delete(&cy_started_sem);
         return;
     }
     tx_thread_resume(&cy_t);
-    tx_thread_sleep(3);
+    tx_semaphore_get(&cy_started_sem, TX_WAIT_FOREVER);
     uart_puts("  [canary] ");
     uart_puts(tag);
     uart_puts(" dispatched=");
@@ -1186,6 +1222,7 @@ static void canary_check(const char *tag)
     uart_puts("\r\n");
     tx_thread_terminate(&cy_t);
     tx_thread_delete(&cy_t);
+    tx_semaphore_delete(&cy_started_sem);
 }
 
 /* 诊断: 打印线程实际状态/优先级/调度器上下文 */
@@ -1432,7 +1469,7 @@ static void test_priority_inheritance(void)
     /* A 优先级高于测试线程, resume 后立即运行并拿到两把锁。 */
     status = tx_thread_resume(&pi_a);
     TEST_CHECK("pi: A resume", status == TX_SUCCESS);
-    tx_thread_sleep(2);
+    tx_thread_sleep(1);
     diag_thread("pi_a@1st-check", &pi_a);
     {
         UINT ts = 99, tp = 99;
@@ -1455,7 +1492,7 @@ static void test_priority_inheritance(void)
     /* C (12) 阻塞在 M1 -> A 提升到 12。 */
     status = tx_thread_resume(&pi_c);
     TEST_CHECK("pi: C resume", status == TX_SUCCESS);
-    tx_thread_sleep(2);
+    tx_thread_sleep(1);
     diag_thread("pi_a@boost-check", &pi_a);
     diag_thread("pi_c@boost-check", &pi_c);
     trace_mutex("pi_m1", &pi_m1);
@@ -1465,14 +1502,14 @@ static void test_priority_inheritance(void)
     /* B (13) 阻塞在 M2 -> A 保持 12。 */
     status = tx_thread_resume(&pi_b);
     TEST_CHECK("pi: B resume", status == TX_SUCCESS);
-    tx_thread_sleep(2);
+    tx_thread_sleep(1);
     trace_mutex("pi_m1", &pi_m1);
     trace_mutex("pi_m2", &pi_m2);
     TEST_CHECK("pi: A stays at 12", pi_a.tx_thread_priority == 12);
 
     /* 释放 M1: C 获取, A 恢复到 13 (仍被 B 提升)。 */
     pi_flag1 = 1;
-    tx_thread_sleep(2);
+    tx_thread_sleep(1);
     trace_mutex("pi_m1", &pi_m1);
     trace_mutex("pi_m2", &pi_m2);
     TEST_CHECK("pi: A restored to 13", pi_a.tx_thread_priority == 13);
@@ -1480,7 +1517,7 @@ static void test_priority_inheritance(void)
 
     /* 释放 M2: B 获取, A 完全恢复 20 */
     pi_flag2 = 1;
-    tx_thread_sleep(2);
+    tx_thread_sleep(1);
     trace_mutex("pi_m1", &pi_m1);
     trace_mutex("pi_m2", &pi_m2);
     TEST_CHECK("pi: A restored to 14", pi_a.tx_thread_priority == 14);
@@ -1515,6 +1552,7 @@ static volatile ULONG pt_high_ran;
 static volatile ULONG pt_seen_high_before;   /* preemption_change 前观察 */
 static volatile ULONG pt_after_change;       /* change 后 (high 跑完) 才置位 */
 static volatile ULONG pt_seen_high_after;
+static TX_SEMAPHORE pt_done_sem;
 
 static void pt_mid_entry(ULONG p)     /* pri 16, 阈值 12 */
 {
@@ -1534,6 +1572,7 @@ static void pt_mid_entry(ULONG p)     /* pri 16, 阈值 12 */
     pt_after_change = 1;                    /* high 运行并挂起后才到这里 */
     pt_seen_high_after = pt_high_ran;       /* 应为 1 */
 
+    tx_semaphore_put(&pt_done_sem);
     tx_thread_suspend(&pt_mid_t);
 }
 
@@ -1556,6 +1595,9 @@ static void test_preemption_threshold(void)
     pt_after_change = 0;
     pt_seen_high_after = 0;
 
+    status = tx_semaphore_create(&pt_done_sem, "pt_done", 0);
+    TEST_CHECK("pt: completion semaphore", status == TX_SUCCESS);
+
     status = tx_thread_create(&pt_mid_t, "pt_mid", pt_mid_entry, 0,
                               pt_mid_stack, TEST_STACK_SIZE,
                               16, 12, TX_NO_TIME_SLICE, TX_DONT_START);
@@ -1566,7 +1608,8 @@ static void test_preemption_threshold(void)
     TEST_CHECK("pt: high create (pri 13)", status == TX_SUCCESS);
 
     tx_thread_resume(&pt_mid_t);
-    tx_thread_sleep(3);                       /* 等 mid 完成整个流程 */
+    status = tx_semaphore_get(&pt_done_sem, TX_WAIT_FOREVER);
+    TEST_CHECK("pt: completion handshake", status == TX_SUCCESS);
 
     TEST_CHECK("pt: mid ran", pt_mid_counter >= 2000);
     TEST_CHECK("pt: high not run under threshold", pt_seen_high_before == 0);
@@ -1578,6 +1621,7 @@ static void test_preemption_threshold(void)
     tx_thread_terminate(&pt_high_t);
     tx_thread_delete(&pt_mid_t);
     tx_thread_delete(&pt_high_t);
+    tx_semaphore_delete(&pt_done_sem);
 }
 
 /* 诊断看门狗: pri 30 忙计数, 任何时刻只要调度器正常它就该累计 */
@@ -1623,6 +1667,8 @@ static UCHAR     rel_stack1[TEST_STACK_SIZE];
 static UCHAR     rel_stack2[TEST_STACK_SIZE];
 static volatile ULONG rel_counter[3];
 static volatile ULONG rel_stop;
+static volatile ULONG rel_started_mask;
+static TX_SEMAPHORE rel_started_sem;
 
 static void rel_entry(ULONG p)
 {
@@ -1630,6 +1676,11 @@ static void rel_entry(ULONG p)
     while (!rel_stop)
     {
         rel_counter[p]++;
+        if ((rel_started_mask & (1UL << p)) == 0)
+        {
+            rel_started_mask |= (1UL << p);
+            tx_semaphore_put(&rel_started_sem);
+        }
         tx_thread_relinquish();              /* 让给同优先级线程 */
     }
     tx_thread_suspend(p == 0 ? &rel_t0 : (p == 1 ? &rel_t1 : &rel_t2));
@@ -1665,6 +1716,10 @@ static void cmp_entry(ULONG p)
 static TX_THREAD ds_t;
 static UCHAR     ds_stack[TEST_STACK_SIZE];
 static volatile ULONG ds_counter;
+static TX_SEMAPHORE ds_started_sem;
+static TX_SEMAPHORE ds_resumed_sem;
+static volatile ULONG ds_resume_requested;
+static volatile ULONG ds_resume_advanced;
 
 static void ds_entry(ULONG p)
 {
@@ -1672,6 +1727,15 @@ static void ds_entry(ULONG p)
     while (1)
     {
         ds_counter++;
+        if (ds_counter == 1)
+            tx_semaphore_put(&ds_started_sem);
+        if (ds_resume_requested)
+        {
+            ds_resume_requested = 0;
+            /* 到达这里说明线程已在恢复后完成了一次循环。 */
+            ds_resume_advanced = 1;
+            tx_semaphore_put(&ds_resumed_sem);
+        }
         tx_thread_sleep(1);
     }
 }
@@ -1689,7 +1753,7 @@ static void test_thread_advanced(void)
     wa_done = 0;
     wa_sleep_status = 0;
     status = tx_thread_create(&wa_t, "wa", wa_entry, 0, wa_stack, TEST_STACK_SIZE,
-                              18, 18, TX_NO_TIME_SLICE, TX_DONT_START);
+                              14, 14, TX_NO_TIME_SLICE, TX_DONT_START);
     TEST_CHECK("adv: wait_abort thread create", status == TX_SUCCESS);
 
     /* 启动看门狗 (pri 30): 观测窗口内调度器是否派发任何线程 */
@@ -1707,7 +1771,7 @@ static void test_thread_advanced(void)
         uart_puts(" exec_prio=");
         uart_putdec(_tx_thread_execute_ptr ? _tx_thread_execute_ptr->tx_thread_priority : 99);
         uart_puts("\r\n");
-        tx_thread_sleep(3);                  /* wa 进入长睡眠 */
+        /* wa 优先级高于测试线程, resume 返回时已进入长睡眠。 */
         ta = tx_time_get();
         wd1 = wd_count;
         uart_puts("  [diag] sleep(1) elapsed=");
@@ -1730,7 +1794,6 @@ static void test_thread_advanced(void)
     status = tx_thread_wait_abort(&wa_t);
     uart_puts("  [trace] wait_abort status="); uart_putdec(status); uart_puts(" wa_sleep_status="); uart_putdec(wa_sleep_status); uart_puts(" wa_done="); uart_putdec(wa_done); uart_puts("\r\n");
     TEST_CHECK("adv: wait_abort status", status == TX_SUCCESS);
-    tx_thread_sleep(3);
     TEST_CHECK("adv: sleep aborted", wa_sleep_status == TX_WAIT_ABORTED);
     TEST_CHECK("adv: thread resumed after abort", wa_done != 0);
     tx_thread_terminate(&wa_t);
@@ -1740,7 +1803,10 @@ static void test_thread_advanced(void)
 
     /* --- relinquish (3 个同优先级线程轮转) --- */
     rel_stop = 0;
+    rel_started_mask = 0;
     rel_counter[0] = rel_counter[1] = rel_counter[2] = 0;
+    status = tx_semaphore_create(&rel_started_sem, "rel_started", 0);
+    TEST_CHECK("adv: relinquish start semaphore", status == TX_SUCCESS);
     tx_thread_create(&rel_t0, "rel0", rel_entry, 0, rel_stack0, TEST_STACK_SIZE,
                      18, 18, TX_NO_TIME_SLICE, TX_DONT_START);
     tx_thread_create(&rel_t1, "rel1", rel_entry, 1, rel_stack1, TEST_STACK_SIZE,
@@ -1750,7 +1816,12 @@ static void test_thread_advanced(void)
     tx_thread_resume(&rel_t0);
     tx_thread_resume(&rel_t1);
     tx_thread_resume(&rel_t2);
-    tx_thread_sleep(3);
+    status = tx_semaphore_get(&rel_started_sem, TX_WAIT_FOREVER);
+    TEST_CHECK("adv: relinquish thread0 started", status == TX_SUCCESS);
+    status = tx_semaphore_get(&rel_started_sem, TX_WAIT_FOREVER);
+    TEST_CHECK("adv: relinquish thread1 started", status == TX_SUCCESS);
+    status = tx_semaphore_get(&rel_started_sem, TX_WAIT_FOREVER);
+    TEST_CHECK("adv: relinquish thread2 started", status == TX_SUCCESS);
     rel_stop = 1;
     tx_thread_sleep(1);
     TEST_CHECK("adv: relinquish all ran",
@@ -1761,13 +1832,14 @@ static void test_thread_advanced(void)
     tx_thread_delete(&rel_t0);
     tx_thread_delete(&rel_t1);
     tx_thread_delete(&rel_t2);
+    tx_semaphore_delete(&rel_started_sem);
 
     /* --- priority_change: 14 → 13, 修改后再次运行 --- */
     pc_prio_seen = 0;
     tx_thread_create(&pc_t, "pc", pc_entry, 0, pc_stack, TEST_STACK_SIZE,
                      14, 14, TX_NO_TIME_SLICE, TX_DONT_START);
     tx_thread_resume(&pc_t);
-    tx_thread_sleep(3);                      /* pc 运行后进入定时睡眠 */
+    tx_thread_sleep(1);                      /* pc 运行后进入定时睡眠 */
     status = tx_thread_priority_change(&pc_t, 13, &old_prio);
     TEST_CHECK("adv: priority_change status", status == TX_SUCCESS);
     TEST_CHECK("adv: old priority 14", old_prio == 14);
@@ -1799,21 +1871,32 @@ static void test_thread_advanced(void)
 
     /* --- delayed suspension (挂起睡眠中的线程) --- */
     ds_counter = 0;
+    ds_resume_requested = 0;
+    ds_resume_advanced = 0;
+    status = tx_semaphore_create(&ds_started_sem, "ds_started", 0);
+    TEST_CHECK("adv: delayed suspension start semaphore", status == TX_SUCCESS);
+    status = tx_semaphore_create(&ds_resumed_sem, "ds_resumed", 0);
+    TEST_CHECK("adv: delayed suspension resume semaphore", status == TX_SUCCESS);
     tx_thread_create(&ds_t, "ds", ds_entry, 0, ds_stack, TEST_STACK_SIZE,
                      18, 18, TX_NO_TIME_SLICE, TX_DONT_START);
     tx_thread_resume(&ds_t);
-    tx_thread_sleep(3);
+    status = tx_semaphore_get(&ds_started_sem, TX_WAIT_FOREVER);
+    TEST_CHECK("adv: delayed suspension start", status == TX_SUCCESS);
     TEST_CHECK("adv: ds counting", ds_counter > 0);
     status = tx_thread_suspend(&ds_t);       /* 睡眠中挂起 */
     TEST_CHECK("adv: suspend sleeping thread", status == TX_SUCCESS);
     c1 = ds_counter;
-    tx_thread_sleep(3);
+    tx_thread_sleep(1);
     TEST_CHECK("adv: counter frozen when suspended", ds_counter == c1);
     tx_thread_resume(&ds_t);
-    tx_thread_sleep(3);
-    TEST_CHECK("adv: counter resumes after resume", ds_counter > c1);
+    ds_resume_requested = 1;
+    status = tx_semaphore_get(&ds_resumed_sem, TX_WAIT_FOREVER);
+    TEST_CHECK("adv: delayed suspension resume handshake", status == TX_SUCCESS);
+    TEST_CHECK("adv: counter resumes after resume", ds_resume_advanced != 0);
     tx_thread_terminate(&ds_t);
     tx_thread_delete(&ds_t);
+    tx_semaphore_delete(&ds_started_sem);
+    tx_semaphore_delete(&ds_resumed_sem);
 }
 
 /* ========================================================================
@@ -1862,16 +1945,15 @@ static void test_abort_cleanup(void)
                              ab_q_storage, sizeof(ab_q_storage));
     TEST_CHECK("ab: queue create", status == TX_SUCCESS);
     status = tx_thread_create(&ab_q_t, "ab_q", ab_q_entry, 0, ab_q_stack,
-                              TEST_STACK_SIZE, 18, 18, TX_NO_TIME_SLICE,
+                              TEST_STACK_SIZE, 14, 14, TX_NO_TIME_SLICE,
                               TX_DONT_START);
     TEST_CHECK("ab: queue thread create", status == TX_SUCCESS);
     tx_thread_resume(&ab_q_t);
-    tx_thread_sleep(3);                      /* 线程阻塞在空队列 */
+    /* ab_q 优先级高于测试线程, resume 返回时已阻塞在空队列。 */
     diag_thread("ab_q@pre-waitabort", &ab_q_t);
     status = tx_thread_wait_abort(&ab_q_t);
     uart_puts("  [trace] ab wait_abort status="); uart_putdec(status); uart_puts(" ab_q_status="); uart_putdec(ab_q_status); uart_puts("\r\n");
     TEST_CHECK("ab: wait_abort on queue", status == TX_SUCCESS);
-    tx_thread_sleep(3);
     TEST_CHECK("ab: receive aborted", ab_q_status == TX_WAIT_ABORTED);
     tx_thread_terminate(&ab_q_t);
     tx_thread_delete(&ab_q_t);
