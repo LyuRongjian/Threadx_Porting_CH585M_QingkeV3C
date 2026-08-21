@@ -237,14 +237,22 @@ __highcode_init:
     addi a0, a0, 4
     bltu a0, a1, 1b
 2:
-    /* Prefetch Enable */
-    li t0, 0x25
-    csrw 0xbc0, t0
-    /* Enable HPE (Hardware Push/Pop Entry) */
-    li t0, 0x3
-    csrw 0x804, t0
-    li t0, 0x1
-    csrw 0xbc1, t0
+	/* Prefetch Enable */
+	li t0, 0x25
+	csrw 0xbc0, t0
+
+	/* 关闭 HPE 硬件压栈与硬件中断嵌套 (ThreadX 移植采用全软件上下文保存)。
+	 *
+	 * HPE 的 mret 硬件弹栈由内部状态位控制 (中断进入时置位):
+	 * 调度器从"线程主动让出/首次调度"路径用 mret 恢复中断帧时
+	 * 该状态位未置位, 弹栈不会发生, 导致 sp 少加 64 字节且
+	 * 调用者保存寄存器丢失 (运行时崩溃根因, 对照 WCH 原厂
+	 * FreeRTOS/RT-Thread CH585 移植均不依赖 HPE 弹栈恢复线程)。
+	 * 0xbc1 与原厂一致写 0 (无硬件嵌套, 嵌套由 system_state 管理)。 */
+	li t0, 0
+	csrw 0x804, t0
+	li t0, 0
+	csrw 0xbc1, t0
 
     /* MPP=Machine(0b11), MPIE=0, MIE=0 — mret 后 MIE=MPIE=0 (中断关闭),
      * 运行于 Machine 模式; 中断由 _tx_thread_schedule 开启。

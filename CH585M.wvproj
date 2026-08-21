@@ -112,7 +112,7 @@
 					"includes": {
 						"include_paths": [
 							"${project}/Middleware/threadx/common/inc",
-							"${project}/Middleware/threadx/ports/QinkeV3C/inc"
+							"${project}/Middleware/threadx/ports/QingkeV3C/inc"
 						],
 						"include_system_paths": [],
 						"include_files": []
@@ -140,7 +140,7 @@
 							"${project}/StdPeriphDriver/inc",
 							"${project}/RVMSIS",
 							"${project}/Middleware/threadx/common/inc",
-							"${project}/Middleware/threadx/ports/QinkeV3C/inc"
+							"${project}/Middleware/threadx/ports/QingkeV3C/inc"
 						],
 						"include_system_paths": [],
 						"include_files": []

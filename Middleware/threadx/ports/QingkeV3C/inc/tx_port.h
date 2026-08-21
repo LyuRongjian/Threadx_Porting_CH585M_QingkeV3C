@@ -45,7 +45,7 @@ typedef unsigned short                          USHORT;
 #endif
 
 /* Define the minimum stack for a ThreadX thread on this processor.
-   需容纳: 中断软帧(64B) + HPE 硬件帧(64B) + C 调用深度。  */
+   需容纳: 中断软帧(128B) + C 调用深度。  */
 #ifndef TX_MINIMUM_STACK
 #define TX_MINIMUM_STACK                        1024
 #endif

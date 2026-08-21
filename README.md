@@ -4,7 +4,9 @@ Azure RTOS ThreadX 在 WCH QingKe V3C (CH585M, RV32IMAC) 上的移植实现。
 
 ## 概述
 
-本移植针对 CH585M MCU 的 **QingKe V3C** RISC-V 内核，利用其独有的 **HPE（Hardware Push/Pop Entry）** 硬件压栈/出栈机制实现高效的中断上下文管理。
+本移植针对 CH585M MCU 的 **QingKe V3C** RISC-V 内核，采用**全软件上下文保存**模型（与官方 ThreadX risc-v32/risc-v64 移植一致）。
+
+> **重要**：本移植**关闭 HPE 硬件压栈**（启动文件 CSR `0x804 = 0`）。原因见[已解决的问题 #3](#3-随机崩溃hpe-弹栈状态依赖)。
 
 ### 硬件平台
 
@@ -15,13 +17,13 @@ Azure RTOS ThreadX 在 WCH QingKe V3C (CH585M, RV32IMAC) 上的移植实现。
 | Flash | 448 KB (0x00000000) |
 | SRAM | 128 KB (0x20000000) |
 | 系统时钟 | 62.4 MHz (HSE PLL) |
-| 中断控制器 | PFIC + HPE |
+| 中断控制器 | PFIC |
 | 系统定时器 | SysTick (0xE000F000) |
 
 ### 移植参考
 
-- **官方 ThreadX risc-v32/risc-v64 移植**：上下文切换逻辑、调度器结构
-- **WCH 原厂 FreeRTOS/RT-Thread 移植**：HPE 配置、中断入口、流水线延时处理
+- **官方 ThreadX risc-v32/risc-v64 移植**：上下文切换逻辑、调度器结构、128B 全量软件帧
+- **WCH 原厂 FreeRTOS/RT-Thread 移植**：确认 HPE 不可用于线程上下文恢复、流水线延时处理、CSR 配置
 
 ---
 
@@ -32,7 +34,7 @@ QingkeV3C/
 ├── inc/
 │   └── tx_port.h                  # 移植层头文件：类型、栈帧、寄存器、构建选项
 ├── src/
-│   ├── qingke_hpe_isr.S           # HPE 统一中断包装（PROLOGUE/EPILOGUE 宏）
+│   ├── qingke_hpe_isr.S           # 统一中断包装（TX_ISR_PROLOGUE/EPILOGUE 宏，全软件上下文）
 │   ├── tx_initialize_low_level.c  # 底层初始化：系统栈、SysTick、PFIC
 │   ├── tx_thread_interrupt_control.S  # 中断开关（mstatus.MIE + 流水线延时）
 │   ├── tx_thread_schedule.S       # 调度器：查找就绪线程并恢复上下文
@@ -44,46 +46,76 @@ QingkeV3C/
 
 ---
 
-## HPE 机制与栈帧布局
+## 上下文模型与栈帧布局
 
-### HPE 硬件压栈
+### 全软件上下文（HPE 已关闭）
 
-CH585 的 QingKe V3C 内核支持 HPE（CSR `0x804` INTSYSCR，启动文件中设为 `0x3` 启用）。中断入口和 `mret` 时，硬件自动压入/弹出 **16 个调用者保存寄存器**（a0-a7, t0-t6, ra）到被打断者的栈上。
+中断入口由软件保存全部易失寄存器，`mret` 仅负责返回（跳转 mepc、恢复 MIE/MPP），**不依赖任何硬件弹栈行为**：
 
-软件无需感知 HPE 帧的内部布局，只需在 HPE 帧之上追加自己的软帧。
+- HPE 的 `mret` 硬件弹栈（恢复 16 个调用者保存寄存器 + sp 偏移）受**内部状态位**控制：中断进入时置位、弹栈后清除
+- 调度器从"线程主动让出"（`_tx_thread_system_return`）或首次调度路径用 `mret` 恢复中断帧时，该状态位**未置位，弹栈不会发生**
+- 若依赖弹栈：恢复的线程 sp 少加 64 字节、a0-a7/t0-t6/ra 全为垃圾值 → 栈错位破坏 → 随机崩溃
+- WCH 原厂 FreeRTOS/RT-Thread 移植同样不依赖 HPE 弹栈恢复线程（均手动保存全部寄存器，SW_Handler 中还用 `csrs 0x804, 0x20` 显式禁止弹栈）
 
-### 软件栈帧（64 字节）
+### 中断栈帧（128 字节，32 字）
 
-移植层在每个中断入口追加保存的栈帧，布局如下：
+所有中断入口由 `TX_ISR_PROLOGUE` 构建的软件帧：
 
 ```
 偏移    内容                  说明
-+0x00   帧类型                0 = 主动帧 (solicited), 1 = 中断帧 (interrupt)
-+0x04   ra                    主动帧：返回地址；中断帧：保留
-+0x08   s0                    被调用者保存寄存器
-+0x0C   s1
-+0x10   s2
-+0x14   s3
-+0x18   s4
-+0x1C   s5
-+0x20   s6
-+0x24   s7
-+0x28   s8
-+0x2C   s9
-+0x30   s10
-+0x34   s11
-+0x38   mstatus              机器状态寄存器
-+0x3C   mepc                  中断帧：机器中断 PC；主动帧：保留
++0x00   帧类型 = 1           中断帧标识
++0x04   ra                  返回地址
++0x08   t0                  调用者保存寄存器
++0x0C   t1
++0x10   t2
++0x14   t3
++0x18   t4
++0x1C   t5
++0x20   t6
++0x24   a0
++0x28   a1
++0x2C   a2
++0x30   a3
++0x34   a4
++0x38   a5
++0x3C   a6
++0x40   a7
++0x44   s0                  被调用者保存寄存器
++0x48   s1
++0x4C   s2
++0x50   s3
++0x54   s4
++0x58   s5
++0x5C   s6
++0x60   s7
++0x64   s8
++0x68   s9
++0x6C   s10
++0x70   s11
++0x74   mstatus             机器状态寄存器
++0x78   mepc                被打断处的 PC
++0x7C   保留
 ```
 
-软帧之后紧跟 HPE 硬件帧（64 字节），由硬件在 `mret` 时弹出。
+### 主动栈帧（64 字节）
+
+`_tx_thread_system_return`（线程主动让出）构建的帧。由 C 函数调用进入，按 RISC-V ABI 调用者保存寄存器本就无需保存：
+
+```
+偏移    内容                  说明
++0x00   帧类型 = 0           主动帧标识
++0x04   ra                  返回地址
++0x08   s0                  被调用者保存寄存器
+...     s1..s11             +0x0C..+0x34
++0x38   mstatus             机器状态寄存器
+```
 
 ### 新线程初始栈帧
 
-`tx_thread_stack_build.S` 为新线程构建两个帧：
+`tx_thread_stack_build.S` 为新线程构建**单个 128 字节中断帧**（与 ISR 帧布局完全一致）：
+类型 = 1，全部寄存器 = 0，mstatus = `0x1880`（MPP=Machine, MPIE=1, MIE=0），mepc = `_tx_thread_shell_entry`。
 
-1. **软帧**（64B）：类型 = 1（中断帧），s0-s11 = 0，mstatus = `0x1880`（MPP=Machine, MPIE=1, MIE=0），mepc = 线程入口函数
-2. **伪 HPE 帧**（64B）：全零，供首次 `mret` 时硬件弹出并得到干净的调用者保存寄存器
+调度器按中断帧恢复后 `mret`：MIE←MPIE=1（开中断），跳转到线程入口，全部寄存器从 0 开始（线程参数由 TCB 提供，不依赖寄存器）。
 
 ---
 
@@ -93,21 +125,21 @@ CH585 的 QingKe V3C 内核支持 HPE（CSR `0x804` INTSYSCR，启动文件中�
 
 `qingke_hpe_isr.S` 定义了两个宏，所有中断共用：
 
-#### TX_HPE_PROLOGUE（中断入口）
+#### TX_ISR_PROLOGUE（中断入口）
 
-1. 在 HPE 硬件帧之上构建 64B 软帧（类型 = 1，s0-s11，mstatus，mepc）
+1. 软件保存全部易失寄存器构成 128B 中断帧（类型 = 1，ra/t0-t6/a0-a7/s0-s11/mstatus/mepc）
 2. `_tx_thread_system_state++`（内核据此识别 ISR 上下文）
 3. 首层中断（state == 1）且有线程被打断时：保存 sp 到 TCB 偏移 8，切到系统栈
 4. 嵌套中断或初始化/空闲期间：不换栈，直接在当前栈上处理
 
-#### TX_HPE_EPILOGUE（中断出口）
+#### TX_ISR_EPILOGUE（中断出口）
 
 1. `_tx_thread_system_state--`
-2. 若仍在中断嵌套/初始化/空闲：恢复软帧后 `mret` 返回
+2. 若仍在中断嵌套/初始化/空闲：恢复全量软件帧后 `mret` 返回
 3. 检查抢占条件：
    - `preempt_disable > 0`：不抢占，恢复被打断线程
    - `execute_ptr == current_ptr`：无更高优先级就绪，恢复被打断线程
-   - 需要抢占：保存剩余时间片，清 `current_ptr`，切系统栈，跳转 `_tx_thread_schedule`
+   - 需要抢占：保存剩余时间片，清 `current_ptr`，切系统栈，跳转 `_tx_thread_schedule`（上下文已在入口完整保存）
 
 ### 中断向量表
 
@@ -124,9 +156,9 @@ CH585 的 QingKe V3C 内核支持 HPE（CSR `0x804` INTSYSCR，启动文件中�
 
 ### 中断嵌套控制
 
-- HPE 硬件层面：禁止硬件嵌套（SysTick/SWI 的 IPRIOR bit7 = 1）
+- PFIC 层面：SysTick/SWI 的 IPRIOR bit7 = 1（非抢占优先级）
 - 软件层面：`_tx_thread_system_state` 计数器管理，中断期间全程关闭 MIE
-- CSR `0xbc1` = `0x1`：中断嵌套控制
+- CSR `0xbc1` = `0x0`（无硬件嵌套，与原厂移植一致）
 
 ### QingKe 3 级流水线延时
 
@@ -156,8 +188,8 @@ CH585 的 QingKe V3C 内核支持 HPE（CSR `0x804` INTSYSCR，启动文件中�
 4. 设 `current_ptr = execute_ptr`，`run_count++`，设时间片
 5. 切到线程栈（TCB 偏移 8）
 6. 判断帧类型：
-   - **中断帧**（type=1）：恢复 mepc/mstatus/s0-s11，sp 跳过软帧，`mret`（HPE 硬件弹出调用者保存寄存器）
-   - **主动帧**（type=0）：恢复 mstatus/ra/s0-s11，sp 跳过软帧，`ret`
+   - **中断帧**（type=1，128B）：恢复 mepc/mstatus/ra/t0-t6/a0-a7/s0-s11，sp 跳过软帧，`mret`
+   - **主动帧**（type=0，64B）：恢复 mstatus/ra/s0-s11，sp 跳过软帧，`ret`
 
 ---
 
@@ -178,14 +210,14 @@ CH585 的 QingKe V3C 内核支持 HPE（CSR `0x804` INTSYSCR，启动文件中�
 
 ```
 SysTick_Handler (qingke_hpe_isr.S)
-  ├── TX_HPE_PROLOGUE          # 保存上下文, system_state++
+  ├── TX_ISR_PROLOGUE          # 保存全量上下文, system_state++
   ├── 清 STK_SR (写 0 到 0xE000F004)
   ├── call _tx_timer_interrupt # tx_timer_interrupt.S
   │     ├── _tx_timer_system_clock++
   │     ├── 时间片递减, 到期调 _tx_thread_time_slice
   │     └── 定时器链表推进, 到期调 _tx_timer_expiration_process
   │           └── preempt_disable++ → 唤醒 _tx_timer_thread
-  └── TX_HPE_EPILOGUE          # system_state--, 抢占判定
+  └── TX_ISR_EPILOGUE          # system_state--, 抢占判定
 ```
 
 ### preempt_disable 平衡机制
@@ -212,7 +244,7 @@ SysTick_Handler (qingke_hpe_isr.S)
 4. SysTick/SWI 设为非抢占优先级（IPRIOR bit7 = 1）
 5. PFIC 使能 SysTick 中断
 
-向量表（`mtvec`，绝对地址模式）和 HPE 硬件压栈（INTSYSCR = 0x3）由启动文件 `startup_CH585_TX.S` 配置。
+向量表（`mtvec`，绝对地址模式）由启动文件 `startup_CH585_TX.S` 配置；HPE 硬件压栈在该文件中显式关闭（`0x804 = 0`）。
 
 ---
 
@@ -225,9 +257,9 @@ SysTick_Handler (qingke_hpe_isr.S)
 _start → handle_reset (startup_CH585_TX.S)
   ├── 加载 .highcode_init / .highcode / .data 从 Flash 到 RAM
   ├── 清零 .bss
-  ├── CSR 0xbc0 = 0x25 (Prefetch Enable)
-  ├── CSR 0x804 = 0x3  (HPE Enable)
-  ├── CSR 0xbc1 = 0x1  (中断嵌套控制)
+  ├── CSR 0xbc0 = 0x25  (Prefetch Enable)
+  ├── CSR 0x804 = 0x0   (HPE 关闭, 全软件上下文)
+  ├── CSR 0xbc1 = 0x0   (无硬件中断嵌套)
   ├── mstatus = 0x1800  (MPP=Machine, MIE=0)
   ├── mtvec = _vector_base | 3 (绝对地址模式)
   └── mepc = main → mret
@@ -283,7 +315,7 @@ RAM (0x20000000, 128KB):
 | 宏 | 默认值 | 说明 |
 |----|--------|------|
 | `TX_MAX_PRIORITIES` | 32 | 优先级数量（32-1024，须为 32 的倍数） |
-| `TX_MINIMUM_STACK` | 1024 | 最小线程栈大小（字） |
+| `TX_MINIMUM_STACK` | 1024 | 最小线程栈大小（字节） |
 | `TX_TIMER_THREAD_STACK_SIZE` | 1024 | 定时器线程栈大小 |
 | `TX_TIMER_THREAD_PRIORITY` | 0 | 定时器线程优先级（最高） |
 | `TX_TIMER_TICKS_PER_SECOND` | 100 | 每秒 tick 数 |
@@ -313,9 +345,9 @@ RAM (0x20000000, 128KB):
 | `0x300` | mstatus | `0x1800` (启动) | MPP=Machine, MIE=0；运行中 bit3=MIE |
 | `0x305` | mtvec | `_vector_base \| 3` | 绝对地址向量模式 |
 | `0x341` | mepc | 中断返回 PC | |
-| `0x804` | INTSYSCR | `0x3` | HPE 使能 |
+| `0x804` | INTSYSCR | `0x0` | **HPE 关闭**（全软件上下文） |
 | `0xbc0` | - | `0x25` | 预取使能 |
-| `0xbc1` | - | `0x1` | 中断嵌套控制 |
+| `0xbc1` | - | `0x0` | 无硬件中断嵌套 |
 | `0xE000E000` | PFIC_BASE | - | 中断控制器基址 |
 | `0xE000F000` | STK_CTLR | - | SysTick 控制 |
 
@@ -362,28 +394,46 @@ RAM (0x20000000, 128KB):
 
 **修复**：移除 `#ifdef TX_TIMER_PROCESS_IN_ISR` 条件分支，始终调用 `_tx_timer_expiration_process`，与官方 risc-v32 参考移植一致。
 
+### 3. 随机崩溃（HPE 弹栈状态依赖）
+
+**现象**：多线程 + SysTick 抢占 + 睡眠切换场景下随机崩溃/挂死。
+
+**根因**：移植层原依赖 HPE 硬件压栈（CSR `0x804 = 0x3`）保存 16 个调用者保存寄存器，`_tx_thread_schedule` 恢复中断帧时 `addi sp, sp, 64; mret` 假设硬件弹栈必然发生。
+
+但 HPE 的 `mret` 硬件弹栈受**内部状态位**控制（中断进入时置位、弹栈后清除）：
+
+| 进入调度器的路径 | 弹栈状态位 | 后果 |
+|---|---|---|
+| 中断退出抢占（EPILOGUE） | 已置位 | 弹栈正确 |
+| 线程主动让出（`_tx_thread_system_return`）/ 首次调度 | **未置位** | **sp 少加 64 字节 + a0-a7/t0-t6/ra 全为垃圾 → 栈错位破坏 → 随机崩溃** |
+
+只要系统中存在两个先后被中断抢占的线程，第二个被恢复时必踩此坑。
+
+**佐证**：WCH 原厂 FreeRTOS/RT-Thread CH585 移植均不依赖 HPE 弹栈恢复线程——上下文切换全部采用完整软件帧（手动保存全部寄存器），且 SW_Handler 在 `mret` 前用 `csrs 0x804, 0x20` 显式禁止弹栈。
+
+**修复**（关闭 HPE，全软件上下文，与官方 ThreadX risc-v32 移植结构一致）：
+1. `qingke_hpe_isr.S`：中断帧改为 128 字节全量软件帧（ra/t0-t6/a0-a7/s0-s11/mstatus/mepc），宏更名为 `TX_ISR_PROLOGUE`/`TX_ISR_EPILOGUE`
+2. `tx_thread_schedule.S`：中断帧路径全量软件恢复后 `mret`，不依赖硬件弹栈
+3. `tx_thread_stack_build.S`：初始帧改为单个 128 字节中断帧，删除伪 HPE 帧
+4. `startup_CH585_TX.S`：`0x804 = 0`（关 HPE）、`0xbc1 = 0`（与原厂一致）
+
 ---
 
-## 演示程序
+## 测试程序
 
-`src/Main.c` 包含两个演示线程：
+`src/Main.c` 包含 14 组综合测试（test_thread，优先级 15，TX_AUTO_START）：
 
-| 线程 | 优先级 | 睡眠 | 周期 |
-|------|--------|------|------|
-| thread 0 | 2 | 100 tick | 1 秒 |
-| thread 1 | 3 | 50 tick | 0.5 秒 |
+| # | 测试项 | # | 测试项 |
+|---|--------|---|--------|
+| 1 | 线程创建与基本调度 | 8 | 事件标志组（AND/OR） |
+| 2 | 线程抢占调度 | 9 | 字节内存池 |
+| 3 | 时间片轮转 | 10 | 块内存池 |
+| 4 | 线程挂起/恢复 | 11 | 软件定时器 |
+| 5 | 消息队列 | 12 | 系统时间 |
+| 6 | 计数信号量 | 13 | 中断控制 |
+| 7 | 互斥量（含递归） | 14 | 集成测试（4 线程 + 队列/信号量/互斥量/事件/内存池） |
 
-预期输出：
-
-```
-ThreadX CH585 port start
-ThreadX CH585: thread 0
-ThreadX CH585: thread 1
-ThreadX CH585: thread 0
-ThreadX CH585: thread 1
-ThreadX CH585: thread 0
-...（持续输出）
-```
+测试完成后输出 PASS/FAIL 汇总。
 
 UART1 配置：PA8=RXD, PA9=TXD，波特率跟随系统时钟。
 
