@@ -1128,6 +1128,857 @@ static void test_integration(void)
 }
 
 /* ========================================================================
+ *  测试 15: 真实外设中断 (TMR0) 上下文测试
+ *
+ *  覆盖此前唯一未执行的移植路径:
+ *    向量表 IRQn16 (TMR0) -> unified_interrupt_entry (128B 全量软件帧保存)
+ *    -> 按 mcause 查 _real_user_vector_base 表 -> jalr 调用用户 ISR
+ *    -> ISR 内调用内核 API (tx_event_flags_set / tx_semaphore_put)
+ *    -> TX_ISR_EPILOGUE 抢占判定 -> 抢占唤醒更高优先级阻塞线程
+ *
+ *  验证点:
+ *    1. ISR 被分发进入 (unified entry + 查表 + jalr 链路工作)
+ *    2. ISR 内 _tx_thread_system_state == 1 (PROLOGUE 计数正确)
+ *    3. 高优先级线程被 ISR 内 tx_event_flags_set 唤醒并执行
+ *       (唤醒次数 <= 中断次数, 每次 set 唤醒一次)
+ *    4. EPILOGUE 抢占: 高优线程 (pri 5) 唤醒后立即抢回 CPU
+ *       (由 runs > 0 且测试线程睡眠正常返回间接验证)
+ *    5. ISR 内 tx_semaphore_put 计数精确累加
+ *    6. 线程上下文经多次中断打断/恢复后无损坏 (后续输出正常)
+ * ======================================================================== */
+extern volatile ULONG _tx_thread_system_state;
+extern volatile UINT  _tx_thread_preempt_disable;
+extern TX_THREAD      *_tx_thread_execute_ptr;
+extern TX_THREAD      _tx_timer_thread;
+
+/* 诊断金丝雀: 复刻 Test 2 成功模式 (创建→resume→sleep(1)→标志检查),
+ * 在失败点旁就地重放, 直接测"sleep(1) 窗口派发能力"是否完好 */
+static TX_THREAD      cy_t;
+static UCHAR          cy_stack[TEST_STACK_SIZE];
+static volatile ULONG cy_flag;
+
+static void cy_entry(ULONG p)
+{
+    (void)p;
+    cy_flag = 1;
+    tx_thread_suspend(&cy_t);
+}
+
+static void canary_check(const char *tag)
+{
+    UINT status;
+    cy_flag = 0;
+    status = tx_thread_create(&cy_t, "cy", cy_entry, 0, cy_stack, TEST_STACK_SIZE,
+                              20, 20, TX_NO_TIME_SLICE, TX_DONT_START);
+    if (status != TX_SUCCESS)
+    {
+        uart_puts("  [canary] create FAIL\r\n");
+        return;
+    }
+    tx_thread_resume(&cy_t);
+    tx_thread_sleep(1);
+    uart_puts("  [canary] ");
+    uart_puts(tag);
+    uart_puts(" dispatched=");
+    uart_putdec(cy_flag);
+    uart_puts(" state=");
+    uart_putdec(cy_t.tx_thread_state);
+    uart_puts("\r\n");
+    tx_thread_terminate(&cy_t);
+    tx_thread_delete(&cy_t);
+}
+
+/* 诊断: 打印线程实际状态/优先级/调度器上下文 */
+static void diag_thread(const char *tag, TX_THREAD *t)
+{
+    uart_puts("  [diag] ");
+    uart_puts(tag);
+    uart_puts(" state=");
+    uart_putdec(t->tx_thread_state);
+    uart_puts(" prio=");
+    uart_putdec(t->tx_thread_priority);
+    uart_puts(" is_cur=");
+    uart_putdec((ULONG)(tx_thread_identify() == t));
+    uart_puts(" sys_state=");
+    uart_putdec(_tx_thread_system_state);
+    uart_puts(" preempt_dis=");
+    uart_putdec(_tx_thread_preempt_disable);
+    uart_puts("\r\n");
+}
+
+static TX_EVENT_FLAGS_GROUP isr_flags;
+static TX_SEMAPHORE         isr_sem;
+static volatile ULONG       isr_enter_count;
+static volatile ULONG       isr_wait_thread_runs;
+static volatile ULONG       isr_state_in_handler;
+static TX_THREAD            isr_wait_thread;
+static UCHAR                isr_wait_stack[TEST_STACK_SIZE];
+
+static void isr_wait_entry(ULONG p)
+{
+    UINT status;
+    ULONG actual_flags;
+    (void)p;
+
+    while (1)
+    {
+        status = tx_event_flags_get(&isr_flags, 0x1, TX_OR_CLEAR,
+                                    &actual_flags, TX_WAIT_FOREVER);
+        if (status != TX_SUCCESS)
+            break;
+
+        /* 线程上下文: current 必须是本线程, system_state 必须为 0 */
+        if (tx_thread_identify() != &isr_wait_thread)
+            break;
+        if (_tx_thread_system_state != 0)
+            break;
+
+        isr_wait_thread_runs++;
+    }
+}
+
+/* TMR0 中断服务函数 (TMR0 = IRQn 16, 向量表第一个外部中断)。
+ *
+ * 注意: 不使用 __INTERRUPT 属性! 该属性 (WCH-Interrupt-fast) 依赖
+ * HPE 且以 mret 返回, 仅适用于直接入口向量。本函数经
+ * unified_interrupt_entry 以 jalr (普通调用) 进入, 统一入口已保存
+ * 全量上下文, 故必须是普通 C 函数 + __HIGH_CODE (与 WCH 原厂
+ * RT-Thread 经统一入口分发的 ISR 写法一致)。 */
+__HIGH_CODE
+void TMR0_IRQHandler(void)
+{
+    if (TMR0_GetITFlag(TMR0_3_IT_CYC_END))
+    {
+        TMR0_ClearITFlag(TMR0_3_IT_CYC_END);
+
+        isr_enter_count++;
+        isr_state_in_handler = _tx_thread_system_state;   /* 首层 ISR 应为 1 */
+
+        /* ISR 内调用内核 API: 唤醒高优先级阻塞线程 (触发 EPILOGUE 抢占) */
+        tx_event_flags_set(&isr_flags, 0x1, TX_OR);
+        tx_semaphore_put(&isr_sem);
+    }
+}
+
+static void test_isr_context(void)
+{
+    UINT status;
+    ULONG sem_count;
+
+    uart_puts("\r\n[Test 15] Real Peripheral ISR Context (TMR0)\r\n");
+
+    isr_enter_count = 0;
+    isr_wait_thread_runs = 0;
+    isr_state_in_handler = 0;
+
+    status = tx_event_flags_create(&isr_flags, "isr_flags");
+    TEST_CHECK("isr: event flags create", status == TX_SUCCESS);
+    status = tx_semaphore_create(&isr_sem, "isr_sem", 0);
+    TEST_CHECK("isr: semaphore create", status == TX_SUCCESS);
+
+    /* 高优先级线程 (pri 5 < 测试线程 15): 阻塞等事件标志,
+     * 由 TMR0 ISR 唤醒 —— 每次唤醒都走 EPILOGUE 抢占路径 */
+    status = tx_thread_create(&isr_wait_thread, "isr_wait", isr_wait_entry, 0,
+                              isr_wait_stack, TEST_STACK_SIZE,
+                              5, 5, TX_NO_TIME_SLICE, TX_AUTO_START);
+    TEST_CHECK("isr: wait thread create", status == TX_SUCCESS);
+
+    /* TMR0 周期定时: 20ms (FREQ_SYS = 62.4MHz / 50) */
+    TMR0_TimerInit(FREQ_SYS / 50);
+    TMR0_ITCfg(ENABLE, TMR0_3_IT_CYC_END);
+    PFIC_EnableIRQ(TMR0_IRQn);
+
+    /* 睡 5 tick (50ms): 期间应发生 >= 2 次 TMR0 中断,
+     * 每次中断抢占测试线程 -> isr_wait 跑一轮 -> 回到测试线程 */
+    tx_thread_sleep(5);
+
+    /* 停止 TMR0 中断 */
+    TMR0_ITCfg(DISABLE, TMR0_3_IT_CYC_END);
+    PFIC_DisableIRQ(TMR0_IRQn);
+
+    TEST_CHECK("isr: dispatch entered (>=2)", isr_enter_count >= 2);
+    TEST_CHECK("isr: system_state == 1 in ISR", isr_state_in_handler == 1);
+    TEST_CHECK("isr: thread woke from ISR", isr_wait_thread_runs >= 1);
+    TEST_CHECK("isr: wake <= interrupt count", isr_wait_thread_runs <= isr_enter_count);
+
+    /* ISR 内 semaphore put 精确累加 (无线程 get) */
+    status = tx_semaphore_info_get(&isr_sem, TX_NULL, &sem_count, TX_NULL,
+                                   TX_NULL, TX_NULL);
+    TEST_CHECK("isr: semaphore put from ISR",
+               (status == TX_SUCCESS) && (sem_count == isr_enter_count));
+
+    /* 清理 */
+    tx_thread_terminate(&isr_wait_thread);
+    tx_thread_delete(&isr_wait_thread);
+    tx_event_flags_delete(&isr_flags);
+    tx_semaphore_delete(&isr_sem);
+}
+
+/* ========================================================================
+ *  测试 16: 互斥量优先级继承 (嵌套提升与逐级恢复)
+ *
+ *  对齐官方 threadx_mutex_priority_inheritance_test 的核心序列:
+ *    A (pri 20) 持有 M1+M2
+ *    C (pri 12) 阻塞在 M1 → A 提升到 12
+ *    B (pri 14) 阻塞在 M2 → A 保持 12 (取最高等待者)
+ *    A 释放 M1 → A 恢复到 14 (仍被 B 提升), C 获得 M1
+ *    A 释放 M2 → A 完全恢复到 20, B 获得 M2
+ * ======================================================================== */
+static TX_MUTEX  pi_m1, pi_m2;
+static TX_THREAD pi_a, pi_b, pi_c;
+static UCHAR     pi_a_stack[TEST_STACK_SIZE];
+static UCHAR     pi_b_stack[TEST_STACK_SIZE];
+static UCHAR     pi_c_stack[TEST_STACK_SIZE];
+static volatile UINT  pi_a_state, pi_b_state, pi_c_state;
+static volatile ULONG pi_flag1, pi_flag2;
+
+static void pi_a_entry(ULONG p)     /* pri 20: 被提升对象 */
+{
+    (void)p;
+    tx_mutex_get(&pi_m1, TX_WAIT_FOREVER);
+    tx_mutex_get(&pi_m2, TX_WAIT_FOREVER);
+    pi_a_state = 1;
+    while (!pi_flag1)
+        tx_thread_sleep(1);
+    tx_mutex_put(&pi_m1);           /* → A 恢复到 14 */
+    pi_a_state = 2;
+    while (!pi_flag2)
+        tx_thread_sleep(1);
+    tx_mutex_put(&pi_m2);           /* → A 完全恢复到 20 */
+    pi_a_state = 3;
+    tx_thread_suspend(&pi_a);
+}
+
+static void pi_b_entry(ULONG p)     /* pri 14: 阻塞在 M2 */
+{
+    (void)p;
+    if (tx_mutex_get(&pi_m2, TX_WAIT_FOREVER) == TX_SUCCESS)
+    {
+        pi_b_state = 1;
+        tx_mutex_put(&pi_m2);
+    }
+    tx_thread_suspend(&pi_b);
+}
+
+static void pi_c_entry(ULONG p)     /* pri 12: 阻塞在 M1 */
+{
+    (void)p;
+    if (tx_mutex_get(&pi_m1, TX_WAIT_FOREVER) == TX_SUCCESS)
+    {
+        pi_c_state = 1;
+        tx_mutex_put(&pi_m1);
+    }
+    tx_thread_suspend(&pi_c);
+}
+
+static void test_priority_inheritance(void)
+{
+    UINT status, prio;
+
+    uart_puts("\r\n[Test 16] Mutex Priority Inheritance\r\n");
+
+    canary_check("T16-entry");
+
+    pi_a_state = pi_b_state = pi_c_state = 0;
+    pi_flag1 = pi_flag2 = 0;
+
+    status = tx_mutex_create(&pi_m1, "pi_m1", TX_INHERIT);
+    TEST_CHECK("pi: M1 create", status == TX_SUCCESS);
+    status = tx_mutex_create(&pi_m2, "pi_m2", TX_INHERIT);
+    TEST_CHECK("pi: M2 create", status == TX_SUCCESS);
+
+    status = tx_thread_create(&pi_a, "pi_a", pi_a_entry, 0, pi_a_stack, TEST_STACK_SIZE,
+                              20, 20, TX_NO_TIME_SLICE, TX_DONT_START);
+    TEST_CHECK("pi: A create", status == TX_SUCCESS);
+    status = tx_thread_create(&pi_b, "pi_b", pi_b_entry, 0, pi_b_stack, TEST_STACK_SIZE,
+                              14, 14, TX_NO_TIME_SLICE, TX_DONT_START);
+    TEST_CHECK("pi: B create", status == TX_SUCCESS);
+    status = tx_thread_create(&pi_c, "pi_c", pi_c_entry, 0, pi_c_stack, TEST_STACK_SIZE,
+                              12, 12, TX_NO_TIME_SLICE, TX_DONT_START);
+    TEST_CHECK("pi: C create", status == TX_SUCCESS);
+
+    /* A 拿到 M1+M2 后睡眠等 flag */
+    tx_thread_resume(&pi_a);
+    tx_thread_sleep(1);
+    diag_thread("pi_a@1st-check", &pi_a);
+    {
+        UINT ts = 99, tp = 99;
+        uart_puts("  [diag] pi_a rc=");
+        uart_putdec(pi_a.tx_thread_run_count);
+        uart_puts(" exec_is_test=");
+        uart_putdec((ULONG)(_tx_thread_execute_ptr == &test_thread));
+        uart_puts(" exec_is_pi_a=");
+        uart_putdec((ULONG)(_tx_thread_execute_ptr == &pi_a));
+        tx_thread_info_get(&_tx_timer_thread, TX_NULL, &ts, TX_NULL, &tp,
+                           TX_NULL, TX_NULL, TX_NULL, TX_NULL);
+        uart_puts(" tmr_thd state=");
+        uart_putdec(ts);
+        uart_puts(" prio=");
+        uart_putdec(tp);
+        uart_puts("\r\n");
+    }
+    TEST_CHECK("pi: A holds both mutexes", pi_a_state == 1);
+
+    /* C (12) 阻塞在 M1 → A 提升到 12 */
+    tx_thread_resume(&pi_c);
+    tx_thread_sleep(1);
+    diag_thread("pi_a@boost-check", &pi_a);
+    diag_thread("pi_c@boost-check", &pi_c);
+    status = tx_thread_info_get(&pi_a, TX_NULL, TX_NULL, TX_NULL, &prio,
+                                TX_NULL, TX_NULL, TX_NULL, TX_NULL);
+    TEST_CHECK("pi: A boosted to 12", (status == TX_SUCCESS) && (prio == 12));
+
+    /* B (14) 阻塞在 M2 → A 保持 12 */
+    tx_thread_resume(&pi_b);
+    tx_thread_sleep(1);
+    status = tx_thread_info_get(&pi_a, TX_NULL, TX_NULL, TX_NULL, &prio,
+                                TX_NULL, TX_NULL, TX_NULL, TX_NULL);
+    TEST_CHECK("pi: A stays at 12", (status == TX_SUCCESS) && (prio == 12));
+
+    /* 释放 M1: C 获取, A 恢复到 14 (仍被 B 提升) */
+    pi_flag1 = 1;
+    tx_thread_sleep(2);
+    status = tx_thread_info_get(&pi_a, TX_NULL, TX_NULL, TX_NULL, &prio,
+                                TX_NULL, TX_NULL, TX_NULL, TX_NULL);
+    TEST_CHECK("pi: A restored to 14", (status == TX_SUCCESS) && (prio == 14));
+    TEST_CHECK("pi: C acquired M1", pi_c_state == 1);
+
+    /* 释放 M2: B 获取, A 完全恢复 20 */
+    pi_flag2 = 1;
+    tx_thread_sleep(2);
+    status = tx_thread_info_get(&pi_a, TX_NULL, TX_NULL, TX_NULL, &prio,
+                                TX_NULL, TX_NULL, TX_NULL, TX_NULL);
+    TEST_CHECK("pi: A restored to 20", (status == TX_SUCCESS) && (prio == 20));
+    TEST_CHECK("pi: B acquired M2", pi_b_state == 1);
+    TEST_CHECK("pi: A released all", pi_a_state == 3);
+
+    /* 清理 */
+    tx_thread_terminate(&pi_a);
+    tx_thread_terminate(&pi_b);
+    tx_thread_terminate(&pi_c);
+    tx_thread_delete(&pi_a);
+    tx_thread_delete(&pi_b);
+    tx_thread_delete(&pi_c);
+    tx_mutex_delete(&pi_m1);
+    tx_mutex_delete(&pi_m2);
+}
+
+/* ========================================================================
+ *  测试 17: 抢占阈值 (preemption threshold)
+ *
+ *  对齐官方 threadx_thread_multi_level_preemption_threshold_test 的方法:
+ *  阈值语义是"运行中的线程不被优先级 >= 阈值的线程抢占"。
+ *  被测线程 pt_mid (pri 16, 阈值 12) 运行中:
+ *    resume pt_high (pri 13): 13 >= 12 → 不抢占, mid 继续自增
+ *    tx_thread_preemption_change(mid, 14): 13 < 14 → 立即被 high 抢占
+ * ======================================================================== */
+static TX_THREAD pt_mid_t, pt_high_t;
+static UCHAR     pt_mid_stack[TEST_STACK_SIZE];
+static UCHAR     pt_high_stack[TEST_STACK_SIZE];
+static volatile ULONG pt_mid_counter;
+static volatile ULONG pt_high_ran;
+static volatile ULONG pt_seen_high_before;   /* preemption_change 前观察 */
+static volatile ULONG pt_after_change;       /* change 后 (high 跑完) 才置位 */
+static volatile ULONG pt_seen_high_after;
+
+static void pt_mid_entry(ULONG p)     /* pri 16, 阈值 12 */
+{
+    ULONG i;
+    (void)p;
+
+    /* 运行中唤醒 high (13): 13 >= 12 不应抢占 */
+    tx_thread_resume(&pt_high_t);
+
+    /* mid 仍在运行: 自增证明未被抢占 */
+    for (i = 0; i < 2000; i++)
+        pt_mid_counter++;
+    pt_seen_high_before = pt_high_ran;      /* 应为 0 */
+
+    /* 放宽阈值到 14: 13 < 14 → high 立即抢占 */
+    tx_thread_preemption_change(&pt_mid_t, 14, &i);
+    pt_after_change = 1;                    /* high 运行并挂起后才到这里 */
+    pt_seen_high_after = pt_high_ran;       /* 应为 1 */
+
+    tx_thread_suspend(&pt_mid_t);
+}
+
+static void pt_high_entry(ULONG p)    /* pri 13 */
+{
+    (void)p;
+    pt_high_ran = 1;
+    tx_thread_suspend(&pt_high_t);
+}
+
+static void test_preemption_threshold(void)
+{
+    UINT status;
+
+    uart_puts("\r\n[Test 17] Preemption Threshold\r\n");
+
+    pt_mid_counter = 0;
+    pt_high_ran = 0;
+    pt_seen_high_before = 0xFFFFFFFF;
+    pt_after_change = 0;
+    pt_seen_high_after = 0;
+
+    status = tx_thread_create(&pt_mid_t, "pt_mid", pt_mid_entry, 0,
+                              pt_mid_stack, TEST_STACK_SIZE,
+                              16, 12, TX_NO_TIME_SLICE, TX_DONT_START);
+    TEST_CHECK("pt: mid create (pri 16, th 12)", status == TX_SUCCESS);
+    status = tx_thread_create(&pt_high_t, "pt_high", pt_high_entry, 0,
+                              pt_high_stack, TEST_STACK_SIZE,
+                              13, 13, TX_NO_TIME_SLICE, TX_DONT_START);
+    TEST_CHECK("pt: high create (pri 13)", status == TX_SUCCESS);
+
+    tx_thread_resume(&pt_mid_t);
+    tx_thread_sleep(3);                       /* 等 mid 完成整个流程 */
+
+    TEST_CHECK("pt: mid ran", pt_mid_counter >= 2000);
+    TEST_CHECK("pt: high not run under threshold", pt_seen_high_before == 0);
+    TEST_CHECK("pt: high ran after change", (pt_after_change == 1) &&
+               (pt_seen_high_after == 1));
+
+    /* 清理 */
+    tx_thread_terminate(&pt_mid_t);
+    tx_thread_terminate(&pt_high_t);
+    tx_thread_delete(&pt_mid_t);
+    tx_thread_delete(&pt_high_t);
+}
+
+/* 诊断看门狗: pri 30 忙计数, 任何时刻只要调度器正常它就该累计 */
+static TX_THREAD wd_t;
+static UCHAR     wd_stack[512];
+static volatile ULONG wd_count;
+static void wd_entry(ULONG p)
+{
+    (void)p;
+    /* 首次运行时报告当时的 execute_ptr (窗口内视角!) */
+    uart_puts("    [wd] running, exec_prio=");
+    uart_putdec(_tx_thread_execute_ptr ? _tx_thread_execute_ptr->tx_thread_priority : 99);
+    uart_puts("\r\n");
+    while (1)
+        wd_count++;
+}
+
+/* ========================================================================
+ *  测试 18: 线程控制高级 API
+ *    - tx_thread_wait_abort: 中止睡眠, sleep 返回 TX_WAIT_ABORTED
+ *    - tx_thread_relinquish: 同优先级线程轮转
+ *    - tx_thread_priority_change: 运行时改优先级
+ *    - 线程入口 return → 状态 TX_COMPLETED
+ *    - 挂起睡眠中的线程 (delayed suspension): 计数冻结
+ * ======================================================================== */
+static TX_THREAD wa_t;
+static UCHAR     wa_stack[TEST_STACK_SIZE];
+static volatile UINT  wa_sleep_status;
+static volatile ULONG wa_done;
+
+static void wa_entry(ULONG p)
+{
+    (void)p;
+    uart_puts("    [wa] entry running\r\n");
+    wa_sleep_status = tx_thread_sleep(0x7FFFFFFF);   /* 被 wait_abort 中止 */
+    wa_done = 1;
+    tx_thread_suspend(&wa_t);
+}
+
+static TX_THREAD rel_t0, rel_t1, rel_t2;
+static UCHAR     rel_stack0[TEST_STACK_SIZE];
+static UCHAR     rel_stack1[TEST_STACK_SIZE];
+static UCHAR     rel_stack2[TEST_STACK_SIZE];
+static volatile ULONG rel_counter[3];
+static volatile ULONG rel_stop;
+
+static void rel_entry(ULONG p)
+{
+    (void)p;
+    while (!rel_stop)
+    {
+        rel_counter[p]++;
+        tx_thread_relinquish();              /* 让给同优先级线程 */
+    }
+    tx_thread_suspend(p == 0 ? &rel_t0 : (p == 1 ? &rel_t1 : &rel_t2));
+}
+
+static TX_THREAD pc_t;
+static UCHAR     pc_stack[TEST_STACK_SIZE];
+static volatile UINT  pc_prio_seen;
+
+static void pc_entry(ULONG p)
+{
+    UINT prio;
+    (void)p;
+    tx_thread_info_get(&pc_t, TX_NULL, TX_NULL, TX_NULL, &prio,
+                       TX_NULL, TX_NULL, TX_NULL, TX_NULL);
+    pc_prio_seen = prio;                     /* 被改后的优先级 */
+    tx_thread_suspend(&pc_t);
+}
+
+static TX_THREAD cmp_t;
+static UCHAR     cmp_stack[TEST_STACK_SIZE];
+static volatile ULONG cmp_ran;
+
+static void cmp_entry(ULONG p)
+{
+    (void)p;
+    cmp_ran = 1;
+    /* 直接 return → shell 标记 TX_COMPLETED 并自动挂起 */
+}
+
+static TX_THREAD ds_t;
+static UCHAR     ds_stack[TEST_STACK_SIZE];
+static volatile ULONG ds_counter;
+
+static void ds_entry(ULONG p)
+{
+    (void)p;
+    while (1)
+    {
+        ds_counter++;
+        tx_thread_sleep(1);
+    }
+}
+
+static void test_thread_advanced(void)
+{
+    UINT status, state, old_prio;
+    ULONG c1;
+
+    uart_puts("\r\n[Test 18] Thread Advanced APIs\r\n");
+
+    canary_check("T18-entry");
+
+    /* --- wait_abort --- */
+    wa_done = 0;
+    wa_sleep_status = 0;
+    status = tx_thread_create(&wa_t, "wa", wa_entry, 0, wa_stack, TEST_STACK_SIZE,
+                              18, 18, TX_NO_TIME_SLICE, TX_DONT_START);
+    TEST_CHECK("adv: wait_abort thread create", status == TX_SUCCESS);
+
+    /* 启动看门狗 (pri 30): 观测窗口内调度器是否派发任何线程 */
+    wd_count = 0;
+    tx_thread_create(&wd_t, "wd", wd_entry, 0, wd_stack, sizeof(wd_stack),
+                     30, 30, TX_NO_TIME_SLICE, TX_AUTO_START);
+
+    {
+        ULONG tb, ta, wd0, wd1;
+        tb = tx_time_get();
+        wd0 = wd_count;
+        tx_thread_resume(&wa_t);
+        uart_puts("  [diag] pre-sleep: wa_state=");
+        uart_putdec(wa_t.tx_thread_state);
+        uart_puts(" exec_prio=");
+        uart_putdec(_tx_thread_execute_ptr ? _tx_thread_execute_ptr->tx_thread_priority : 99);
+        uart_puts("\r\n");
+        tx_thread_sleep(1);                  /* wa 进入长睡眠 */
+        ta = tx_time_get();
+        wd1 = wd_count;
+        uart_puts("  [diag] sleep(1) elapsed=");
+        uart_putdec(ta - tb);
+        uart_puts(" wd_delta=");
+        uart_putdec(wd1 - wd0);
+        uart_puts("\r\n");
+        diag_thread("wa@after-sleep1", &wa_t);
+        /* 再给一个窗口: wa 若在第二窗口被派发会打印 [wa] entry */
+        tx_thread_sleep(1);
+        diag_thread("wa@after-sleep2", &wa_t);
+        uart_puts("  [diag] wa rc=");
+        uart_putdec(wa_t.tx_thread_run_count);
+        uart_puts(" exec_is_wa=");
+        uart_putdec((ULONG)(_tx_thread_execute_ptr == &wa_t));
+        uart_puts("\r\n");
+    }
+    TEST_CHECK("adv: thread sleeping", wa_t.tx_thread_state == TX_SLEEP);
+    status = tx_thread_wait_abort(&wa_t);
+    TEST_CHECK("adv: wait_abort status", status == TX_SUCCESS);
+    tx_thread_sleep(1);
+    TEST_CHECK("adv: sleep aborted", wa_sleep_status == TX_WAIT_ABORTED);
+    TEST_CHECK("adv: thread resumed after abort", wa_done != 0);
+    tx_thread_terminate(&wa_t);
+    tx_thread_delete(&wa_t);
+    tx_thread_terminate(&wd_t);               /* 清掉看门狗 */
+    tx_thread_delete(&wd_t);
+
+    /* --- relinquish (3 个同优先级线程轮转) --- */
+    rel_stop = 0;
+    rel_counter[0] = rel_counter[1] = rel_counter[2] = 0;
+    tx_thread_create(&rel_t0, "rel0", rel_entry, 0, rel_stack0, TEST_STACK_SIZE,
+                     18, 18, TX_NO_TIME_SLICE, TX_DONT_START);
+    tx_thread_create(&rel_t1, "rel1", rel_entry, 1, rel_stack1, TEST_STACK_SIZE,
+                     18, 18, TX_NO_TIME_SLICE, TX_DONT_START);
+    tx_thread_create(&rel_t2, "rel2", rel_entry, 2, rel_stack2, TEST_STACK_SIZE,
+                     18, 18, TX_NO_TIME_SLICE, TX_DONT_START);
+    tx_thread_resume(&rel_t0);
+    tx_thread_resume(&rel_t1);
+    tx_thread_resume(&rel_t2);
+    tx_thread_sleep(3);
+    rel_stop = 1;
+    tx_thread_sleep(1);
+    TEST_CHECK("adv: relinquish all ran",
+               (rel_counter[0] > 0) && (rel_counter[1] > 0) && (rel_counter[2] > 0));
+    tx_thread_terminate(&rel_t0);
+    tx_thread_terminate(&rel_t1);
+    tx_thread_terminate(&rel_t2);
+    tx_thread_delete(&rel_t0);
+    tx_thread_delete(&rel_t1);
+    tx_thread_delete(&rel_t2);
+
+    /* --- priority_change: 18 → 14, 提升后立即抢占本线程 --- */
+    pc_prio_seen = 0;
+    tx_thread_create(&pc_t, "pc", pc_entry, 0, pc_stack, TEST_STACK_SIZE,
+                     18, 18, TX_NO_TIME_SLICE, TX_DONT_START);
+    tx_thread_resume(&pc_t);
+    tx_thread_sleep(1);                      /* pc 挂起自身 */
+    status = tx_thread_priority_change(&pc_t, 14, &old_prio);
+    TEST_CHECK("adv: priority_change status", status == TX_SUCCESS);
+    TEST_CHECK("adv: old priority 18", old_prio == 18);
+    uart_puts("  [diag] pc after change: exec=");
+    uart_putdec((ULONG)(_tx_thread_execute_ptr == &pc_t));
+    uart_puts(" cur=");
+    uart_putdec((ULONG)(tx_thread_identify() == &pc_t));
+    uart_puts("\r\n");
+    diag_thread("pc@after-change", &pc_t);
+    tx_thread_resume(&pc_t);                 /* pri 14 抢占本线程运行 */
+    TEST_CHECK("adv: new priority 14 seen", pc_prio_seen == 14);
+    tx_thread_terminate(&pc_t);
+    tx_thread_delete(&pc_t);
+
+    /* --- completed (入口 return) --- */
+    canary_check("T18-pre-cmp");
+    cmp_ran = 0;
+    tx_thread_create(&cmp_t, "cmp", cmp_entry, 0, cmp_stack, TEST_STACK_SIZE,
+                     18, 18, TX_NO_TIME_SLICE, TX_DONT_START);
+    tx_thread_resume(&cmp_t);
+    tx_thread_sleep(1);
+    TEST_CHECK("adv: entry ran", cmp_ran != 0);
+    status = tx_thread_info_get(&cmp_t, TX_NULL, &state, TX_NULL, TX_NULL,
+                                TX_NULL, TX_NULL, TX_NULL, TX_NULL);
+    TEST_CHECK("adv: state TX_COMPLETED", (status == TX_SUCCESS) &&
+               (state == TX_COMPLETED));
+    tx_thread_terminate(&cmp_t);
+    tx_thread_delete(&cmp_t);
+
+    /* --- delayed suspension (挂起睡眠中的线程) --- */
+    ds_counter = 0;
+    tx_thread_create(&ds_t, "ds", ds_entry, 0, ds_stack, TEST_STACK_SIZE,
+                     18, 18, TX_NO_TIME_SLICE, TX_DONT_START);
+    tx_thread_resume(&ds_t);
+    tx_thread_sleep(3);
+    TEST_CHECK("adv: ds counting", ds_counter > 0);
+    status = tx_thread_suspend(&ds_t);       /* 睡眠中挂起 */
+    TEST_CHECK("adv: suspend sleeping thread", status == TX_SUCCESS);
+    c1 = ds_counter;
+    tx_thread_sleep(3);
+    TEST_CHECK("adv: counter frozen when suspended", ds_counter == c1);
+    tx_thread_resume(&ds_t);
+    tx_thread_sleep(3);
+    TEST_CHECK("adv: counter resumes after resume", ds_counter > c1);
+    tx_thread_terminate(&ds_t);
+    tx_thread_delete(&ds_t);
+}
+
+/* ========================================================================
+ *  测试 19: 挂起中止与终止清理
+ *    - 线程阻塞在空队列 receive → tx_thread_wait_abort → TX_WAIT_ABORTED
+ *    - 线程阻塞在互斥量 get → tx_thread_terminate →
+ *      状态 TX_TERMINATED 且互斥量挂起计数归零 (挂起链正确摘除)
+ * ======================================================================== */
+static TX_QUEUE  ab_queue;
+static TX_MUTEX  ab_mutex;
+static TX_THREAD ab_q_t, ab_m_t;
+static UCHAR     ab_q_stack[TEST_STACK_SIZE];
+static UCHAR     ab_m_stack[TEST_STACK_SIZE];
+static ULONG     ab_q_storage[8];
+static volatile UINT  ab_q_status;
+static volatile ULONG ab_q_done;
+
+static void ab_q_entry(ULONG p)
+{
+    ULONG v;
+    (void)p;
+    ab_q_status = tx_queue_receive(&ab_queue, &v, TX_WAIT_FOREVER);
+    ab_q_done = 1;
+    tx_thread_suspend(&ab_q_t);
+}
+
+static void ab_m_entry(ULONG p)
+{
+    (void)p;
+    /* 阻塞在测试线程持有的互斥量上, 永不返回 (被 terminate) */
+    tx_mutex_get(&ab_mutex, TX_WAIT_FOREVER);
+    tx_thread_suspend(&ab_m_t);
+}
+
+static void test_abort_cleanup(void)
+{
+    UINT status, state;
+    ULONG susp_count;
+
+    uart_puts("\r\n[Test 19] Wait Abort & Terminate Cleanup\r\n");
+
+    /* --- 队列阻塞 + wait_abort --- */
+    ab_q_status = 0;
+    ab_q_done = 0;
+    status = tx_queue_create(&ab_queue, "ab_queue", TX_1_ULONG,
+                             ab_q_storage, sizeof(ab_q_storage));
+    TEST_CHECK("ab: queue create", status == TX_SUCCESS);
+    status = tx_thread_create(&ab_q_t, "ab_q", ab_q_entry, 0, ab_q_stack,
+                              TEST_STACK_SIZE, 18, 18, TX_NO_TIME_SLICE,
+                              TX_DONT_START);
+    TEST_CHECK("ab: queue thread create", status == TX_SUCCESS);
+    tx_thread_resume(&ab_q_t);
+    tx_thread_sleep(1);                      /* 线程阻塞在空队列 */
+    status = tx_thread_wait_abort(&ab_q_t);
+    TEST_CHECK("ab: wait_abort on queue", status == TX_SUCCESS);
+    tx_thread_sleep(1);
+    TEST_CHECK("ab: receive aborted", ab_q_status == TX_WAIT_ABORTED);
+    tx_thread_terminate(&ab_q_t);
+    tx_thread_delete(&ab_q_t);
+    tx_queue_delete(&ab_queue);
+
+    /* --- 互斥量阻塞 + terminate 清理 --- */
+    status = tx_mutex_create(&ab_mutex, "ab_mutex", TX_NO_INHERIT);
+    TEST_CHECK("ab: mutex create", status == TX_SUCCESS);
+    status = tx_mutex_get(&ab_mutex, TX_NO_WAIT);    /* 测试线程持有 */
+    TEST_CHECK("ab: mutex owned", status == TX_SUCCESS);
+    status = tx_thread_create(&ab_m_t, "ab_m", ab_m_entry, 0, ab_m_stack,
+                              TEST_STACK_SIZE, 18, 18, TX_NO_TIME_SLICE,
+                              TX_DONT_START);
+    TEST_CHECK("ab: mutex thread create", status == TX_SUCCESS);
+    tx_thread_resume(&ab_m_t);
+    tx_thread_sleep(1);                      /* 线程阻塞在互斥量 */
+    status = tx_thread_terminate(&ab_m_t);   /* 终止: 从挂起链摘除 */
+    TEST_CHECK("ab: terminate blocked thread", status == TX_SUCCESS);
+    status = tx_thread_info_get(&ab_m_t, TX_NULL, &state, TX_NULL, TX_NULL,
+                                TX_NULL, TX_NULL, TX_NULL, TX_NULL);
+    TEST_CHECK("ab: state TX_TERMINATED", (status == TX_SUCCESS) &&
+               (state == TX_TERMINATED));
+    status = tx_mutex_info_get(&ab_mutex, TX_NULL, TX_NULL, TX_NULL, TX_NULL,
+                               &susp_count, TX_NULL);
+    TEST_CHECK("ab: mutex suspend list cleaned", (status == TX_SUCCESS) &&
+               (susp_count == 0));
+    status = tx_mutex_put(&ab_mutex);        /* 应正常释放 */
+    TEST_CHECK("ab: mutex put after cleanup", status == TX_SUCCESS);
+    tx_thread_delete(&ab_m_t);
+    tx_mutex_delete(&ab_mutex);
+}
+
+/* ========================================================================
+ *  测试 20: 队列多字消息 (TX_4_ULONG / TX_16_ULONG)
+ *  对齐官方 queue_basic_four_word / sixteen_word 测试
+ * ======================================================================== */
+static void test_queue_multiword(void)
+{
+    UINT status, i;
+    TX_QUEUE q4, q16;
+    ULONG s4[16];                            /* 4 字消息 x 4 条容量 */
+    ULONG s16[64];                           /* 16 字消息 x 4 条容量 */
+    ULONG msg4a[4] = {0x11111111, 0x22222222, 0x33333333, 0x44444444};
+    ULONG msg4b[4] = {0x55555555, 0x66666666, 0x77777777, 0x88888888};
+    ULONG msg16[16];
+    ULONG rx[16];
+    UINT ok4 = 1, ok16 = 1;
+
+    uart_puts("\r\n[Test 20] Queue Multi-Word Messages\r\n");
+
+    for (i = 0; i < 16; i++)
+        msg16[i] = 0xA0000000UL + i;
+
+    /* --- TX_4_ULONG --- */
+    status = tx_queue_create(&q4, "q4", TX_4_ULONG, s4, sizeof(s4));
+    TEST_CHECK("mw: q4 create", status == TX_SUCCESS);
+    status = tx_queue_send(&q4, msg4a, TX_NO_WAIT);
+    TEST_CHECK("mw: q4 send a", status == TX_SUCCESS);
+    status = tx_queue_send(&q4, msg4b, TX_NO_WAIT);
+    TEST_CHECK("mw: q4 send b", status == TX_SUCCESS);
+    status = tx_queue_receive(&q4, rx, TX_NO_WAIT);
+    TEST_CHECK("mw: q4 recv a status", status == TX_SUCCESS);
+    for (i = 0; i < 4; i++)
+        if (rx[i] != msg4a[i]) { ok4 = 0; break; }
+    TEST_CHECK("mw: q4 recv a data (4 words)", ok4);
+    status = tx_queue_receive(&q4, rx, TX_NO_WAIT);
+    TEST_CHECK("mw: q4 recv b status", status == TX_SUCCESS);
+    for (i = 0; i < 4; i++)
+        if (rx[i] != msg4b[i]) { ok4 = 0; break; }
+    TEST_CHECK("mw: q4 recv b data (4 words)", ok4);
+    tx_queue_delete(&q4);
+
+    /* --- TX_16_ULONG --- */
+    status = tx_queue_create(&q16, "q16", TX_16_ULONG, s16, sizeof(s16));
+    TEST_CHECK("mw: q16 create", status == TX_SUCCESS);
+    status = tx_queue_send(&q16, msg16, TX_NO_WAIT);
+    TEST_CHECK("mw: q16 send", status == TX_SUCCESS);
+    status = tx_queue_receive(&q16, rx, TX_NO_WAIT);
+    TEST_CHECK("mw: q16 recv status", status == TX_SUCCESS);
+    for (i = 0; i < 16; i++)
+        if (rx[i] != msg16[i]) { ok16 = 0; break; }
+    TEST_CHECK("mw: q16 recv data (16 words)", ok16);
+    tx_queue_delete(&q16);
+}
+
+/* ========================================================================
+ *  测试 21: 软件定时器精度
+ *    - 单次定时器: 到期时刻 - 启动时刻 ∈ [20, 21] tick
+ *    - 周期定时器: 第 3 次到期时刻差 ∈ [30, 40] tick
+ *    - 停止的定时器不再到期
+ * ======================================================================== */
+static TX_TIMER ta_timer;
+static volatile ULONG ta_count;
+static volatile ULONG ta_first_expire, ta_last_expire;
+
+static void ta_callback(ULONG p)
+{
+    (void)p;
+    if (ta_count == 0)
+        ta_first_expire = tx_time_get();
+    ta_count++;
+    ta_last_expire = tx_time_get();
+}
+
+static void test_timer_accuracy(void)
+{
+    UINT status;
+    ULONG t0;
+    ULONG count_before;
+
+    uart_puts("\r\n[Test 21] Timer Accuracy\r\n");
+
+    /* --- 单次 20 tick --- */
+    ta_count = 0;
+    ta_first_expire = 0;
+    t0 = tx_time_get();
+    status = tx_timer_create(&ta_timer, "ta", ta_callback, 0, 20, 0, TX_NO_ACTIVATE);
+    TEST_CHECK("ta: timer create", status == TX_SUCCESS);
+    status = tx_timer_activate(&ta_timer);
+    TEST_CHECK("ta: activate", status == TX_SUCCESS);
+    tx_thread_sleep(25);                     /* 等到期 + 定时器线程处理 */
+    TEST_CHECK("ta: oneshot expired once", ta_count == 1);
+    TEST_CHECK("ta: oneshot accuracy",
+               (ta_first_expire >= (t0 + 20)) && (ta_first_expire <= (t0 + 21)));
+
+    /* --- 周期 10 tick, 跑 3 次以上 --- */
+    ta_count = 0;
+    ta_first_expire = 0;
+    t0 = tx_time_get();
+    tx_timer_deactivate(&ta_timer);
+    tx_timer_change(&ta_timer, 10, 10);
+    tx_timer_activate(&ta_timer);
+    tx_thread_sleep(35);
+    TEST_CHECK("ta: periodic >= 3 expirations", ta_count >= 3);
+    TEST_CHECK("ta: periodic accuracy",
+               (ta_last_expire >= (t0 + 30)) && (ta_last_expire <= (t0 + 40)));
+
+    /* --- 停止后不再到期 --- */
+    status = tx_timer_deactivate(&ta_timer);
+    TEST_CHECK("ta: deactivate", status == TX_SUCCESS);
+    count_before = ta_count;
+    tx_thread_sleep(25);
+    TEST_CHECK("ta: no expiration after deactivate", ta_count == count_before);
+
+    tx_timer_delete(&ta_timer);
+}
+
+/* ========================================================================
  *  测试主线程入口
  * ======================================================================== */
 static void test_main_entry(ULONG thread_input)
@@ -1155,6 +2006,13 @@ static void test_main_entry(ULONG thread_input)
     test_time();
     test_interrupt_control();
     test_integration();
+    test_isr_context();
+    test_priority_inheritance();
+    test_preemption_threshold();
+    test_thread_advanced();
+    test_abort_cleanup();
+    test_queue_multiword();
+    test_timer_accuracy();
 
     /* 汇总 */
     uart_puts("\r\n========================================\r\n");
