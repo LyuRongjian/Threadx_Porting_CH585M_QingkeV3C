@@ -11,9 +11,9 @@
  *   原厂移植同样不依赖 HPE 弹栈恢复线程: 全部采用完整软件帧,
  *   且 SW_Handler 在 mret 前用 csrs 0x804, 0x20 显式禁止弹栈。
  *
- * 本包装结构 (与官方 ThreadX risc-v32 移植一致, 128 字节全量软件帧):
- *   1. 中断入口软件保存全部易失寄存器: ra/t0-t6/a0-a7/s0-s11
- *      + mstatus/mepc, 帧头标类型=1;
+ * 本包装结构 (与官方 ThreadX risc-v32 移植一致, 144 字节全量软件帧):
+ *   1. 中断入口软件保存 x1-x31 (含 sp/gp/tp) 与 mstatus/mepc,
+ *      帧头标类型=1;
  *   2. _tx_thread_system_state++ (内核由此识别 ISR 上下文);
  *   3. 首层中断且有线程被打断: 保存 sp 到 TCB 并切换到系统栈
  *      (嵌套中断/初始化/空闲期间不切换, 直接在当前栈上处理);
@@ -27,10 +27,9 @@
  *
  * SysTick 与全部外部中断共用本包装, 调度不需要 SW 软件中断。
  *
- * 中断帧布局 (32 字, 128 字节):
- *   +0x00 类型(1)  +0x04 ra       +0x08..0x20 t0-t6
- *   +0x24..0x40 a0-a7            +0x44..0x70 s0-s11
- *   +0x74 mstatus  +0x78 mepc    +0x7C 保留
+ * 中断帧布局 (36 字, 144 字节):
+ *   +0x00 类型(1)  +0x04..0x7C x1-x31 (含 sp/gp/tp)
+ *   +0x80 mstatus  +0x84 mepc    +0x88..0x8C 保留
  ***************************************************************************/
 
     .section .highcode.qingke_hpe_isr, "ax", @progbits
@@ -47,39 +46,43 @@
  * 入口: sp 指向被打断者的栈顶, mepc/mstatus 保存被打断现场。
  */
 .macro TX_ISR_PROLOGUE
-    addi    sp, sp, -128
+    addi    sp, sp, -144
     sw      ra,  0x04(sp)
-    sw      t0,  0x08(sp)
-    sw      t1,  0x0C(sp)
-    sw      t2,  0x10(sp)
-    sw      t3,  0x14(sp)
-    sw      t4,  0x18(sp)
-    sw      t5,  0x1C(sp)
-    sw      t6,  0x20(sp)
-    sw      a0,  0x24(sp)
-    sw      a1,  0x28(sp)
-    sw      a2,  0x2C(sp)
-    sw      a3,  0x30(sp)
-    sw      a4,  0x34(sp)
-    sw      a5,  0x38(sp)
-    sw      a6,  0x3C(sp)
-    sw      a7,  0x40(sp)
-    sw      s0,  0x44(sp)
-    sw      s1,  0x48(sp)
-    sw      s2,  0x4C(sp)
-    sw      s3,  0x50(sp)
-    sw      s4,  0x54(sp)
-    sw      s5,  0x58(sp)
-    sw      s6,  0x5C(sp)
-    sw      s7,  0x60(sp)
-    sw      s8,  0x64(sp)
-    sw      s9,  0x68(sp)
-    sw      s10, 0x6C(sp)
-    sw      s11, 0x70(sp)
+    sw      t0,  0x14(sp)
+    sw      t1,  0x18(sp)
+    sw      t2,  0x1C(sp)
+    sw      t3,  0x20(sp)
+    sw      t4,  0x24(sp)
+    sw      t5,  0x28(sp)
+    sw      t6,  0x2C(sp)
+    sw      a0,  0x30(sp)
+    sw      a1,  0x34(sp)
+    sw      a2,  0x38(sp)
+    sw      a3,  0x3C(sp)
+    sw      a4,  0x40(sp)
+    sw      a5,  0x44(sp)
+    sw      a6,  0x48(sp)
+    sw      a7,  0x4C(sp)
+    sw      s0,  0x50(sp)
+    sw      s1,  0x54(sp)
+    sw      s2,  0x58(sp)
+    sw      s3,  0x5C(sp)
+    sw      s4,  0x60(sp)
+    sw      s5,  0x64(sp)
+    sw      s6,  0x68(sp)
+    sw      s7,  0x6C(sp)
+    sw      s8,  0x70(sp)
+    sw      s9,  0x74(sp)
+    sw      s10, 0x78(sp)
+    sw      s11, 0x7C(sp)
+    addi    t0, sp, 144
+    sw      t0,  0x08(sp)                         /* 原始 sp */
+    sw      gp,  0x0C(sp)
+    sw      tp,  0x10(sp)
     csrr    t0, mstatus
-    sw      t0,  0x74(sp)
+    sw      t0,  0x80(sp)
     csrr    t0, mepc
-    sw      t0,  0x78(sp)
+    sw      t0,  0x84(sp)
     li      t0, 1
     sw      t0,  0x00(sp)                          /* 帧类型 = 1 (中断) */
 
@@ -152,39 +155,42 @@
     lw      sp, 8(t1)
 
 80: /* 恢复软件帧 (全量) 并 mret */
-    lw      t0, 0x78(sp)
+    lw      t0, 0x84(sp)
     csrw    mepc, t0
-    lw      t0, 0x74(sp)
+    lw      t0, 0x80(sp)
     csrw    mstatus, t0
     lw      ra,  0x04(sp)
-    lw      t0,  0x08(sp)
-    lw      t1,  0x0C(sp)
-    lw      t2,  0x10(sp)
-    lw      t3,  0x14(sp)
-    lw      t4,  0x18(sp)
-    lw      t5,  0x1C(sp)
-    lw      t6,  0x20(sp)
-    lw      a0,  0x24(sp)
-    lw      a1,  0x28(sp)
-    lw      a2,  0x2C(sp)
-    lw      a3,  0x30(sp)
-    lw      a4,  0x34(sp)
-    lw      a5,  0x38(sp)
-    lw      a6,  0x3C(sp)
-    lw      a7,  0x40(sp)
-    lw      s0,  0x44(sp)
-    lw      s1,  0x48(sp)
-    lw      s2,  0x4C(sp)
-    lw      s3,  0x50(sp)
-    lw      s4,  0x54(sp)
-    lw      s5,  0x58(sp)
-    lw      s6,  0x5C(sp)
-    lw      s7,  0x60(sp)
-    lw      s8,  0x64(sp)
-    lw      s9,  0x68(sp)
-    lw      s10, 0x6C(sp)
-    lw      s11, 0x70(sp)
-    addi    sp, sp, 128
+    lw      t0,  0x14(sp)
+    lw      t1,  0x18(sp)
+    lw      t2,  0x1C(sp)
+    lw      t3,  0x20(sp)
+    lw      t4,  0x24(sp)
+    lw      t5,  0x28(sp)
+    lw      t6,  0x2C(sp)
+    lw      a0,  0x30(sp)
+    lw      a1,  0x34(sp)
+    lw      a2,  0x38(sp)
+    lw      a3,  0x3C(sp)
+    lw      a4,  0x40(sp)
+    lw      a5,  0x44(sp)
+    lw      a6,  0x48(sp)
+    lw      a7,  0x4C(sp)
+    lw      s0,  0x50(sp)
+    lw      s1,  0x54(sp)
+    lw      s2,  0x58(sp)
+    lw      s3,  0x5C(sp)
+    lw      s4,  0x60(sp)
+    lw      s5,  0x64(sp)
+    lw      s6,  0x68(sp)
+    lw      s7,  0x6C(sp)
+    lw      s8,  0x70(sp)
+    lw      s9,  0x74(sp)
+    lw      s10, 0x78(sp)
+    lw      s11, 0x7C(sp)
+    lw      gp,  0x0C(sp)
+    lw      tp,  0x10(sp)
+    lw      t1,  0x08(sp)
+    mv      sp, t1
     mret
 .endm
 

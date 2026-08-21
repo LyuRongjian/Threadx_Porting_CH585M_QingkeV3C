@@ -3,10 +3,10 @@
  *
  * 等待 _tx_thread_execute_ptr 出现就绪线程并恢复其上下文。
  * 恢复分两类:
- *   - 中断帧(新线程/被打断线程, 128 字节全量软件帧): 恢复
- *     mepc/mstatus/ra/t0-t6/a0-a7/s0-s11 后 sp 跳过软帧, mret;
- *   - 主动帧(_tx_thread_system_return 保存, 64 字节): 恢复
- *     mstatus/ra/s0-s11 后 ret。
+ *   - 中断帧(新线程/被打断线程, 144 字节全量软件帧): 恢复
+ *     x1-x31/mstatus/mepc 后使用保存的 sp, mret;
+ *   - 主动帧(_tx_thread_system_return 保存, 80 字节): 恢复
+ *     mstatus/ra/gp/tp/s0-s11 后 ret。
  *
  * 本移植关闭 HPE 硬件压栈 (CSR 0x804 = 0), 中断帧为全量软件帧:
  * mret 的硬件弹栈受内部状态位控制, 从线程主动让出路径进入本函数时
@@ -66,60 +66,66 @@ _tx_thread_schedule:
     lw      t0, 0(sp)
     beqz    t0, .Lschedule_solicited
 
-    /* ==== 恢复中断帧 (128 字节全量软件帧, 不依赖 HPE 硬件弹栈) ==== */
-    lw      t0, 0x78(sp)                         /* mepc  */
+    /* ==== 恢复中断帧 (144 字节全量软件帧, 不依赖 HPE 硬件弹栈) ==== */
+    lw      t0, 0x84(sp)                         /* mepc  */
     csrw    mepc, t0
-    lw      t0, 0x74(sp)                         /* mstatus */
+    lw      t0, 0x80(sp)                         /* mstatus */
     csrw    mstatus, t0
     lw      ra,  0x04(sp)
-    lw      t0,  0x08(sp)
-    lw      t1,  0x0C(sp)
-    lw      t2,  0x10(sp)
-    lw      t3,  0x14(sp)
-    lw      t4,  0x18(sp)
-    lw      t5,  0x1C(sp)
-    lw      t6,  0x20(sp)
-    lw      a0,  0x24(sp)
-    lw      a1,  0x28(sp)
-    lw      a2,  0x2C(sp)
-    lw      a3,  0x30(sp)
-    lw      a4,  0x34(sp)
-    lw      a5,  0x38(sp)
-    lw      a6,  0x3C(sp)
-    lw      a7,  0x40(sp)
-    lw      s0,  0x44(sp)
-    lw      s1,  0x48(sp)
-    lw      s2,  0x4C(sp)
-    lw      s3,  0x50(sp)
-    lw      s4,  0x54(sp)
-    lw      s5,  0x58(sp)
-    lw      s6,  0x5C(sp)
-    lw      s7,  0x60(sp)
-    lw      s8,  0x64(sp)
-    lw      s9,  0x68(sp)
-    lw      s10, 0x6C(sp)
-    lw      s11, 0x70(sp)
-    addi    sp, sp, 128
+    lw      t0,  0x14(sp)
+    lw      t1,  0x18(sp)
+    lw      t2,  0x1C(sp)
+    lw      t3,  0x20(sp)
+    lw      t4,  0x24(sp)
+    lw      t5,  0x28(sp)
+    lw      t6,  0x2C(sp)
+    lw      a0,  0x30(sp)
+    lw      a1,  0x34(sp)
+    lw      a2,  0x38(sp)
+    lw      a3,  0x3C(sp)
+    lw      a4,  0x40(sp)
+    lw      a5,  0x44(sp)
+    lw      a6,  0x48(sp)
+    lw      a7,  0x4C(sp)
+    lw      s0,  0x50(sp)
+    lw      s1,  0x54(sp)
+    lw      s2,  0x58(sp)
+    lw      s3,  0x5C(sp)
+    lw      s4,  0x60(sp)
+    lw      s5,  0x64(sp)
+    lw      s6,  0x68(sp)
+    lw      s7,  0x6C(sp)
+    lw      s8,  0x70(sp)
+    lw      s9,  0x74(sp)
+    lw      s10, 0x78(sp)
+    lw      s11, 0x7C(sp)
+    lw      gp,  0x0C(sp)
+    lw      tp,  0x10(sp)
+    lw      t1,  0x08(sp)
+    mv      sp, t1
     mret
 
 .Lschedule_solicited:
-    /* ==== 恢复主动帧 ==== */
-    lw      t0, 0x38(sp)                         /* mstatus */
-    csrw    mstatus, t0
+    /* ==== 恢复主动帧 (80 字节) ==== */
+    lw      t0, 0x40(sp)                         /* mstatus */
     lw      ra,  0x04(sp)
-    lw      s0,  0x08(sp)
-    lw      s1,  0x0C(sp)
-    lw      s2,  0x10(sp)
-    lw      s3,  0x14(sp)
-    lw      s4,  0x18(sp)
-    lw      s5,  0x1C(sp)
-    lw      s6,  0x20(sp)
-    lw      s7,  0x24(sp)
-    lw      s8,  0x28(sp)
-    lw      s9,  0x2C(sp)
-    lw      s10, 0x30(sp)
-    lw      s11, 0x34(sp)
-    addi    sp, sp, 64
+    lw      gp,  0x08(sp)
+    lw      tp,  0x0C(sp)
+    lw      s0,  0x10(sp)
+    lw      s1,  0x14(sp)
+    lw      s2,  0x18(sp)
+    lw      s3,  0x1C(sp)
+    lw      s4,  0x20(sp)
+    lw      s5,  0x24(sp)
+    lw      s6,  0x28(sp)
+    lw      s7,  0x2C(sp)
+    lw      s8,  0x30(sp)
+    lw      s9,  0x34(sp)
+    lw      s10, 0x38(sp)
+    lw      s11, 0x3C(sp)
+    addi    sp, sp, 80
+    /* 保持中断关闭直到所有寄存器和 sp 都恢复完成。 */
+    csrw    mstatus, t0
     ret                                         /* 返回线程调用点 */
 
     .size   _tx_thread_schedule, . - _tx_thread_schedule

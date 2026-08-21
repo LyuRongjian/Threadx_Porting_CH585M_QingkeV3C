@@ -22,7 +22,7 @@ Azure RTOS ThreadX 在 WCH QingKe V3C (CH585M, RV32IMAC) 上的移植实现。
 
 ### 移植参考
 
-- **官方 ThreadX risc-v32/risc-v64 移植**：上下文切换逻辑、调度器结构、128B 全量软件帧
+- **官方 ThreadX risc-v32/risc-v64 移植**：上下文切换逻辑、调度器结构、全寄存器软件帧
 - **WCH 原厂 FreeRTOS/RT-Thread 移植**：确认 HPE 不可用于线程上下文恢复、流水线延时处理、CSR 配置
 
 ---
@@ -57,47 +57,27 @@ QingkeV3C/
 - 若依赖弹栈：恢复的线程 sp 少加 64 字节、a0-a7/t0-t6/ra 全为垃圾值 → 栈错位破坏 → 随机崩溃
 - WCH 原厂 FreeRTOS/RT-Thread 移植同样不依赖 HPE 弹栈恢复线程（均手动保存全部寄存器，SW_Handler 中还用 `csrs 0x804, 0x20` 显式禁止弹栈）
 
-### 中断栈帧（128 字节，32 字）
+### 中断栈帧（144 字节，36 字）
 
-所有中断入口由 `TX_ISR_PROLOGUE` 构建的软件帧：
+所有中断入口由 `TX_ISR_PROLOGUE` 构建的软件帧，保存完整的 `x1-x31`，包括 `sp/gp/tp`：
 
 ```
 偏移    内容                  说明
 +0x00   帧类型 = 1           中断帧标识
-+0x04   ra                  返回地址
-+0x08   t0                  调用者保存寄存器
-+0x0C   t1
-+0x10   t2
-+0x14   t3
-+0x18   t4
-+0x1C   t5
-+0x20   t6
-+0x24   a0
-+0x28   a1
-+0x2C   a2
-+0x30   a3
-+0x34   a4
-+0x38   a5
-+0x3C   a6
-+0x40   a7
-+0x44   s0                  被调用者保存寄存器
-+0x48   s1
-+0x4C   s2
-+0x50   s3
-+0x54   s4
-+0x58   s5
-+0x5C   s6
-+0x60   s7
-+0x64   s8
-+0x68   s9
-+0x6C   s10
-+0x70   s11
-+0x74   mstatus             机器状态寄存器
-+0x78   mepc                被打断处的 PC
-+0x7C   保留
++0x04   x1/ra               返回地址
++0x08   x2/sp               被打断线程的原始栈指针
++0x0C   x3/gp               全局指针
++0x10   x4/tp               线程指针
++0x14   x5/t0 ... +0x2C x7/t6
++0x30   x10/a0 ... +0x4C x17/a7
++0x50   x8/s0 ... +0x7C x27/s11
++0x80   mstatus             机器状态寄存器
++0x84   mepc                被打断处的 PC
++0x88   保留
++0x8C   保留
 ```
 
-### 主动栈帧（64 字节）
+### 主动栈帧（80 字节）
 
 `_tx_thread_system_return`（线程主动让出）构建的帧。由 C 函数调用进入，按 RISC-V ABI 调用者保存寄存器本就无需保存：
 
@@ -105,14 +85,16 @@ QingkeV3C/
 偏移    内容                  说明
 +0x00   帧类型 = 0           主动帧标识
 +0x04   ra                  返回地址
-+0x08   s0                  被调用者保存寄存器
-...     s1..s11             +0x0C..+0x34
-+0x38   mstatus             机器状态寄存器
++0x08   gp                  全局指针
++0x0C   tp                  线程指针
++0x10   s0                  被调用者保存寄存器
++0x14..+0x3C s1..s11
++0x40   mstatus             机器状态寄存器
 ```
 
 ### 新线程初始栈帧
 
-`tx_thread_stack_build.S` 为新线程构建**单个 128 字节中断帧**（与 ISR 帧布局完全一致）：
+`tx_thread_stack_build.S` 为新线程构建**单个 144 字节中断帧**（与 ISR 帧布局完全一致）：
 类型 = 1，全部寄存器 = 0，mstatus = `0x1880`（MPP=Machine, MPIE=1, MIE=0），mepc = `_tx_thread_shell_entry`。
 
 调度器按中断帧恢复后 `mret`：MIE←MPIE=1（开中断），跳转到线程入口，全部寄存器从 0 开始（线程参数由 TCB 提供，不依赖寄存器）。
@@ -127,7 +109,7 @@ QingkeV3C/
 
 #### TX_ISR_PROLOGUE（中断入口）
 
-1. 软件保存全部易失寄存器构成 128B 中断帧（类型 = 1，ra/t0-t6/a0-a7/s0-s11/mstatus/mepc）
+1. 软件保存 x1-x31 构成 144B 中断帧（类型 = 1，含 sp/gp/tp 与 mstatus/mepc）
 2. `_tx_thread_system_state++`（内核据此识别 ISR 上下文）
 3. 首层中断（state == 1）且有线程被打断时：保存 sp 到 TCB 偏移 8，切到系统栈
 4. 嵌套中断或初始化/空闲期间：不换栈，直接在当前栈上处理
@@ -191,8 +173,8 @@ QingkeV3C/
 4. 设 `current_ptr = execute_ptr`，`run_count++`，设时间片
 5. 切到线程栈（TCB 偏移 8）
 6. 判断帧类型：
-   - **中断帧**（type=1，128B）：恢复 mepc/mstatus/ra/t0-t6/a0-a7/s0-s11，sp 跳过软帧，`mret`
-   - **主动帧**（type=0，64B）：恢复 mstatus/ra/s0-s11，sp 跳过软帧，`ret`
+  - **中断帧**（type=1，144B）：恢复 x1-x31/mstatus/mepc，使用保存的 sp，`mret`
+  - **主动帧**（type=0，80B）：恢复 mstatus/ra/gp/tp/s0-s11，sp 跳过软帧，`ret`
 
 ---
 
@@ -415,9 +397,9 @@ RAM (0x20000000, 128KB):
 **佐证**：WCH 原厂 FreeRTOS/RT-Thread CH585 移植均不依赖 HPE 弹栈恢复线程——上下文切换全部采用完整软件帧（手动保存全部寄存器），且 SW_Handler 在 `mret` 前用 `csrs 0x804, 0x20` 显式禁止弹栈。
 
 **修复**（关闭 HPE，全软件上下文，与官方 ThreadX risc-v32 移植结构一致）：
-1. `qingke_hpe_isr.S`：中断帧改为 128 字节全量软件帧（ra/t0-t6/a0-a7/s0-s11/mstatus/mepc），宏更名为 `TX_ISR_PROLOGUE`/`TX_ISR_EPILOGUE`
+1. `qingke_hpe_isr.S`：中断帧改为 144 字节全量软件帧（x1-x31/mstatus/mepc），宏更名为 `TX_ISR_PROLOGUE`/`TX_ISR_EPILOGUE`
 2. `tx_thread_schedule.S`：中断帧路径全量软件恢复后 `mret`，不依赖硬件弹栈
-3. `tx_thread_stack_build.S`：初始帧改为单个 128 字节中断帧，删除伪 HPE 帧
+3. `tx_thread_stack_build.S`：初始帧改为单个 144 字节中断帧，删除伪 HPE 帧
 4. `startup_CH585_TX.S`：`0x804 = 0`（关 HPE）、`0xbc1 = 0`（与原厂一致）
 
 ---

@@ -4,7 +4,7 @@
  * 移植模型 (参考官方 risc-v32/risc-v64 移植 + WCH EVT FreeRTOS/RT-Thread):
  *   - 启动文件关闭 QingKe V3C 硬件压栈 (HPE, INTSYSCR.HWSTKEN=0),
  *     避免 mret 的隐藏硬件状态影响线程恢复;
- *   - 移植层在每个中断入口保存完整通用寄存器/mstatus/mepc 构成
+ *   - 移植层在每个中断入口保存 x1-x31/mstatus/mepc 构成
  *     ThreadX 中断栈帧,
  *     并维护 _tx_thread_system_state, 中断退出时统一做出抢占判定;
  *   - 上下文切换不使用 SW 软件中断, 与官方 ThreadX 移植一致;
@@ -12,11 +12,10 @@
  *
  * 线程栈帧布局 (低地址在前, 单位: 字节):
  *   +0x00  帧类型: 0=主动(solicited), 1=中断(interrupt)
- *   主动帧为 16 字 (64 字节): +0x04 ra, +0x08..+0x34 s0-s11,
- *     +0x38 mstatus;
- *   中断帧为 32 字 (128 字节): +0x04 ra, +0x08..+0x20 t0-t6,
- *     +0x24..+0x40 a0-a7, +0x44..+0x70 s0-s11,
- *     +0x74 mstatus, +0x78 mepc;
+ *   主动帧为 20 字 (80 字节): +0x04 ra, +0x08 gp, +0x0C tp,
+ *     +0x10..+0x3C s0-s11, +0x40 mstatus;
+ *   中断帧为 36 字 (144 字节): +0x04..+0x7C x1-x31,
+ *     +0x80 mstatus, +0x84 mepc;
  *   中断帧为完整软件帧, 不依赖 HPE 硬件帧布局。
  ***************************************************************************/
 #ifndef TX_PORT_H
@@ -47,7 +46,7 @@ typedef unsigned short                          USHORT;
 #endif
 
 /* Define the minimum stack for a ThreadX thread on this processor.
-   需容纳: 中断软帧(128B) + C 调用深度。  */
+   需容纳: 中断软帧(144B) + C 调用深度。  */
 #ifndef TX_MINIMUM_STACK
 #define TX_MINIMUM_STACK                        1024
 #endif

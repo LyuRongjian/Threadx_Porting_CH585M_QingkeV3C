@@ -2,7 +2,7 @@
  * tx_thread_system_return.S -- 线程主动让出 CPU (QingKe V3C / CH58x, HPE)
  *
  * 内核服务需要重新调度时从线程上下文调用 (调用者保存寄存器视为已失效,
- * 只需保存 ra/s0-s11/mstatus 构成主动帧), 随后返回调度器。
+ * 只需保存 ra/gp/tp/s0-s11/mstatus 构成主动帧), 随后返回调度器。
  ***************************************************************************/
 
     .section .highcode.tx_thread_system_return, "ax", @progbits
@@ -20,23 +20,25 @@ _tx_thread_system_return:
     nop
     nop
 
-    /* 构建主动栈帧 (16 字) */
-    addi    sp, sp, -64
+    /* 构建主动栈帧 (20 字, 80 字节) */
+    addi    sp, sp, -80
     sw      zero, 0(sp)                           /* 帧类型 = 0 (主动) */
-    sw      t0, 0x38(sp)                          /* 先保存 mstatus (含 MIE 原状态) */
+    sw      t0, 0x40(sp)                          /* 先保存 mstatus (含 MIE 原状态) */
     sw      ra,  0x04(sp)
-    sw      s0,  0x08(sp)
-    sw      s1,  0x0C(sp)
-    sw      s2,  0x10(sp)
-    sw      s3,  0x14(sp)
-    sw      s4,  0x18(sp)
-    sw      s5,  0x1C(sp)
-    sw      s6,  0x20(sp)
-    sw      s7,  0x24(sp)
-    sw      s8,  0x28(sp)
-    sw      s9,  0x2C(sp)
-    sw      s10, 0x30(sp)
-    sw      s11, 0x34(sp)
+    sw      gp,  0x08(sp)
+    sw      tp,  0x0C(sp)
+    sw      s0,  0x10(sp)
+    sw      s1,  0x14(sp)
+    sw      s2,  0x18(sp)
+    sw      s3,  0x1C(sp)
+    sw      s4,  0x20(sp)
+    sw      s5,  0x24(sp)
+    sw      s6,  0x28(sp)
+    sw      s7,  0x2C(sp)
+    sw      s8,  0x30(sp)
+    sw      s9,  0x34(sp)
+    sw      s10, 0x38(sp)
+    sw      s11, 0x3C(sp)
 
     /* 保存线程栈指针到 TCB (偏移 8)
        先清空 current_ptr，避免中断在这段窗口里看到旧线程仍在执行并覆盖掉
