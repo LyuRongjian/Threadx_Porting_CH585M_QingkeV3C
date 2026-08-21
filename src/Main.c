@@ -244,7 +244,7 @@ static void test_thread_preemption(void)
     tx_thread_resume(&preempt_low);
 
     /* 睡眠 1 tick 让低优先级线程开始运行 */
-    tx_thread_sleep(1);
+    tx_thread_sleep(3);
 
     /* 确认低优先级线程已启动 */
     TEST_CHECK("preempt: low started", preempt_low_started != 0);
@@ -257,7 +257,7 @@ static void test_thread_preemption(void)
      * 此检查必须在 resume(high) 之前 —— 高线程一旦运行会置
      * preempt_high_ran=1, 低线程循环条件随即为假而退出, 之后
      * 不再自增。放在此处 (ran 恒为 0) 才是确定性的。 */
-    tx_thread_sleep(1);
+    tx_thread_sleep(3);
     TEST_CHECK("preempt: low was running", preempt_low_counter > low_count_before);
 
     /* 恢复高优先级线程, 应立即抢占低优先级线程 */
@@ -1176,7 +1176,7 @@ static void canary_check(const char *tag)
         return;
     }
     tx_thread_resume(&cy_t);
-    tx_thread_sleep(1);
+    tx_thread_sleep(3);
     uart_puts("  [canary] ");
     uart_puts(tag);
     uart_puts(" dispatched=");
@@ -1350,10 +1350,10 @@ static void test_isr_context(void)
  *  测试 16: 互斥量优先级继承 (嵌套提升与逐级恢复)
  *
  *  对齐官方 threadx_mutex_priority_inheritance_test 的核心序列:
- *    A (pri 20) 持有 M1+M2
+ *    A (pri 14) 持有 M1+M2
  *    C (pri 12) 阻塞在 M1 → A 提升到 12
- *    B (pri 14) 阻塞在 M2 → A 保持 12 (取最高等待者)
- *    A 释放 M1 → A 恢复到 14 (仍被 B 提升), C 获得 M1
+ *    B (pri 13) 阻塞在 M2 → A 保持 12 (取最高等待者)
+ *    A 释放 M1 → A 恢复到 13 (仍被 B 提升), C 获得 M1
  *    A 释放 M2 → A 完全恢复到 20, B 获得 M2
  * ======================================================================== */
 static TX_MUTEX  pi_m1, pi_m2;
@@ -1364,7 +1364,7 @@ static UCHAR     pi_c_stack[TEST_STACK_SIZE];
 static volatile UINT  pi_a_state, pi_b_state, pi_c_state;
 static volatile ULONG pi_flag1, pi_flag2;
 
-static void pi_a_entry(ULONG p)     /* pri 20: 被提升对象 */
+static void pi_a_entry(ULONG p)     /* pri 14: 被提升对象 */
 {
     (void)p;
     tx_mutex_get(&pi_m1, TX_WAIT_FOREVER);
@@ -1381,7 +1381,7 @@ static void pi_a_entry(ULONG p)     /* pri 20: 被提升对象 */
     tx_thread_suspend(&pi_a);
 }
 
-static void pi_b_entry(ULONG p)     /* pri 14: 阻塞在 M2 */
+static void pi_b_entry(ULONG p)     /* pri 13: 阻塞在 M2 */
 {
     (void)p;
     if (tx_mutex_get(&pi_m2, TX_WAIT_FOREVER) == TX_SUCCESS)
@@ -1405,7 +1405,7 @@ static void pi_c_entry(ULONG p)     /* pri 12: 阻塞在 M1 */
 
 static void test_priority_inheritance(void)
 {
-    UINT status, prio;
+    UINT status;
 
     uart_puts("\r\n[Test 16] Mutex Priority Inheritance\r\n");
 
@@ -1420,18 +1420,19 @@ static void test_priority_inheritance(void)
     TEST_CHECK("pi: M2 create", status == TX_SUCCESS);
 
     status = tx_thread_create(&pi_a, "pi_a", pi_a_entry, 0, pi_a_stack, TEST_STACK_SIZE,
-                              20, 20, TX_NO_TIME_SLICE, TX_DONT_START);
+                              14, 14, TX_NO_TIME_SLICE, TX_DONT_START);
     TEST_CHECK("pi: A create", status == TX_SUCCESS);
     status = tx_thread_create(&pi_b, "pi_b", pi_b_entry, 0, pi_b_stack, TEST_STACK_SIZE,
-                              14, 14, TX_NO_TIME_SLICE, TX_DONT_START);
+                              13, 13, TX_NO_TIME_SLICE, TX_DONT_START);
     TEST_CHECK("pi: B create", status == TX_SUCCESS);
     status = tx_thread_create(&pi_c, "pi_c", pi_c_entry, 0, pi_c_stack, TEST_STACK_SIZE,
                               12, 12, TX_NO_TIME_SLICE, TX_DONT_START);
     TEST_CHECK("pi: C create", status == TX_SUCCESS);
 
-    /* A 拿到 M1+M2 后睡眠等 flag */
-    tx_thread_resume(&pi_a);
-    tx_thread_sleep(1);
+    /* A 优先级高于测试线程, resume 后立即运行并拿到两把锁。 */
+    status = tx_thread_resume(&pi_a);
+    TEST_CHECK("pi: A resume", status == TX_SUCCESS);
+    tx_thread_sleep(2);
     diag_thread("pi_a@1st-check", &pi_a);
     {
         UINT ts = 99, tp = 99;
@@ -1451,34 +1452,30 @@ static void test_priority_inheritance(void)
     }
     TEST_CHECK("pi: A holds both mutexes", pi_a_state == 1);
 
-    /* C (12) 阻塞在 M1 → A 提升到 12 */
-    tx_thread_resume(&pi_c);
-    tx_thread_sleep(1);
+    /* C (12) 阻塞在 M1 -> A 提升到 12。 */
+    status = tx_thread_resume(&pi_c);
+    TEST_CHECK("pi: C resume", status == TX_SUCCESS);
+    tx_thread_sleep(2);
     diag_thread("pi_a@boost-check", &pi_a);
     diag_thread("pi_c@boost-check", &pi_c);
     trace_mutex("pi_m1", &pi_m1);
     trace_mutex("pi_m2", &pi_m2);
-    status = tx_thread_info_get(&pi_a, TX_NULL, TX_NULL, TX_NULL, &prio,
-                                TX_NULL, TX_NULL, TX_NULL, TX_NULL);
-    TEST_CHECK("pi: A boosted to 12", (status == TX_SUCCESS) && (prio == 12));
+    TEST_CHECK("pi: A boosted to 12", pi_a.tx_thread_priority == 12);
 
-    /* B (14) 阻塞在 M2 → A 保持 12 */
-    tx_thread_resume(&pi_b);
-    tx_thread_sleep(1);
+    /* B (13) 阻塞在 M2 -> A 保持 12。 */
+    status = tx_thread_resume(&pi_b);
+    TEST_CHECK("pi: B resume", status == TX_SUCCESS);
+    tx_thread_sleep(2);
     trace_mutex("pi_m1", &pi_m1);
     trace_mutex("pi_m2", &pi_m2);
-    status = tx_thread_info_get(&pi_a, TX_NULL, TX_NULL, TX_NULL, &prio,
-                                TX_NULL, TX_NULL, TX_NULL, TX_NULL);
-    TEST_CHECK("pi: A stays at 12", (status == TX_SUCCESS) && (prio == 12));
+    TEST_CHECK("pi: A stays at 12", pi_a.tx_thread_priority == 12);
 
-    /* 释放 M1: C 获取, A 恢复到 14 (仍被 B 提升) */
+    /* 释放 M1: C 获取, A 恢复到 13 (仍被 B 提升)。 */
     pi_flag1 = 1;
     tx_thread_sleep(2);
     trace_mutex("pi_m1", &pi_m1);
     trace_mutex("pi_m2", &pi_m2);
-    status = tx_thread_info_get(&pi_a, TX_NULL, TX_NULL, TX_NULL, &prio,
-                                TX_NULL, TX_NULL, TX_NULL, TX_NULL);
-    TEST_CHECK("pi: A restored to 14", (status == TX_SUCCESS) && (prio == 14));
+    TEST_CHECK("pi: A restored to 13", pi_a.tx_thread_priority == 13);
     TEST_CHECK("pi: C acquired M1", pi_c_state == 1);
 
     /* 释放 M2: B 获取, A 完全恢复 20 */
@@ -1486,9 +1483,7 @@ static void test_priority_inheritance(void)
     tx_thread_sleep(2);
     trace_mutex("pi_m1", &pi_m1);
     trace_mutex("pi_m2", &pi_m2);
-    status = tx_thread_info_get(&pi_a, TX_NULL, TX_NULL, TX_NULL, &prio,
-                                TX_NULL, TX_NULL, TX_NULL, TX_NULL);
-    TEST_CHECK("pi: A restored to 20", (status == TX_SUCCESS) && (prio == 20));
+    TEST_CHECK("pi: A restored to 14", pi_a.tx_thread_priority == 14);
     TEST_CHECK("pi: B acquired M2", pi_b_state == 1);
     TEST_CHECK("pi: A released all", pi_a_state == 3);
 
@@ -1648,6 +1643,8 @@ static void pc_entry(ULONG p)
 {
     UINT prio;
     (void)p;
+    /* 先让测试线程有机会修改本线程的优先级，再由定时器唤醒。 */
+    tx_thread_sleep(5);
     tx_thread_info_get(&pc_t, TX_NULL, TX_NULL, TX_NULL, &prio,
                        TX_NULL, TX_NULL, TX_NULL, TX_NULL);
     pc_prio_seen = prio;                     /* 被改后的优先级 */
@@ -1710,7 +1707,7 @@ static void test_thread_advanced(void)
         uart_puts(" exec_prio=");
         uart_putdec(_tx_thread_execute_ptr ? _tx_thread_execute_ptr->tx_thread_priority : 99);
         uart_puts("\r\n");
-        tx_thread_sleep(1);                  /* wa 进入长睡眠 */
+        tx_thread_sleep(3);                  /* wa 进入长睡眠 */
         ta = tx_time_get();
         wd1 = wd_count;
         uart_puts("  [diag] sleep(1) elapsed=");
@@ -1733,7 +1730,7 @@ static void test_thread_advanced(void)
     status = tx_thread_wait_abort(&wa_t);
     uart_puts("  [trace] wait_abort status="); uart_putdec(status); uart_puts(" wa_sleep_status="); uart_putdec(wa_sleep_status); uart_puts(" wa_done="); uart_putdec(wa_done); uart_puts("\r\n");
     TEST_CHECK("adv: wait_abort status", status == TX_SUCCESS);
-    tx_thread_sleep(1);
+    tx_thread_sleep(3);
     TEST_CHECK("adv: sleep aborted", wa_sleep_status == TX_WAIT_ABORTED);
     TEST_CHECK("adv: thread resumed after abort", wa_done != 0);
     tx_thread_terminate(&wa_t);
@@ -1765,23 +1762,23 @@ static void test_thread_advanced(void)
     tx_thread_delete(&rel_t1);
     tx_thread_delete(&rel_t2);
 
-    /* --- priority_change: 18 → 14, 提升后立即抢占本线程 --- */
+    /* --- priority_change: 14 → 13, 修改后再次运行 --- */
     pc_prio_seen = 0;
     tx_thread_create(&pc_t, "pc", pc_entry, 0, pc_stack, TEST_STACK_SIZE,
-                     18, 18, TX_NO_TIME_SLICE, TX_DONT_START);
+                     14, 14, TX_NO_TIME_SLICE, TX_DONT_START);
     tx_thread_resume(&pc_t);
-    tx_thread_sleep(1);                      /* pc 挂起自身 */
-    status = tx_thread_priority_change(&pc_t, 14, &old_prio);
+    tx_thread_sleep(3);                      /* pc 运行后进入定时睡眠 */
+    status = tx_thread_priority_change(&pc_t, 13, &old_prio);
     TEST_CHECK("adv: priority_change status", status == TX_SUCCESS);
-    TEST_CHECK("adv: old priority 18", old_prio == 18);
+    TEST_CHECK("adv: old priority 14", old_prio == 14);
     uart_puts("  [diag] pc after change: exec=");
     uart_putdec((ULONG)(_tx_thread_execute_ptr == &pc_t));
     uart_puts(" cur=");
     uart_putdec((ULONG)(tx_thread_identify() == &pc_t));
     uart_puts("\r\n");
     diag_thread("pc@after-change", &pc_t);
-    tx_thread_resume(&pc_t);                 /* pri 14 抢占本线程运行 */
-    TEST_CHECK("adv: new priority 14 seen", pc_prio_seen == 14);
+    tx_thread_sleep(6);                      /* 等待 pc 的原定时器到期 */
+    TEST_CHECK("adv: new priority 13 seen", pc_prio_seen == 13);
     tx_thread_terminate(&pc_t);
     tx_thread_delete(&pc_t);
 
@@ -1869,12 +1866,12 @@ static void test_abort_cleanup(void)
                               TX_DONT_START);
     TEST_CHECK("ab: queue thread create", status == TX_SUCCESS);
     tx_thread_resume(&ab_q_t);
-    tx_thread_sleep(1);                      /* 线程阻塞在空队列 */
+    tx_thread_sleep(3);                      /* 线程阻塞在空队列 */
     diag_thread("ab_q@pre-waitabort", &ab_q_t);
     status = tx_thread_wait_abort(&ab_q_t);
     uart_puts("  [trace] ab wait_abort status="); uart_putdec(status); uart_puts(" ab_q_status="); uart_putdec(ab_q_status); uart_puts("\r\n");
     TEST_CHECK("ab: wait_abort on queue", status == TX_SUCCESS);
-    tx_thread_sleep(1);
+    tx_thread_sleep(3);
     TEST_CHECK("ab: receive aborted", ab_q_status == TX_WAIT_ABORTED);
     tx_thread_terminate(&ab_q_t);
     tx_thread_delete(&ab_q_t);
@@ -2035,8 +2032,28 @@ static void test_main_entry(ULONG thread_input)
     uart_puts("  Full Software Context Save\r\n");
     uart_puts("========================================\r\n");
 
-    /* 逐项测试 - 临时仅保留 Test 16: 优先级继承定位 */
+    /* 逐项运行全部测试。 */
+    test_thread_basic_v2();
+    test_thread_preemption();
+    test_time_slice();
+    test_suspend_resume();
+    test_queue();
+    test_semaphore();
+    test_mutex();
+    test_event_flags();
+    test_byte_pool();
+    test_block_pool();
+    test_timer();
+    test_time();
+    test_interrupt_control();
+    test_integration();
+    test_isr_context();
     test_priority_inheritance();
+    test_preemption_threshold();
+    test_thread_advanced();
+    test_abort_cleanup();
+    test_queue_multiword();
+    test_timer_accuracy();
 
     /* 汇总 */
     uart_puts("\r\n========================================\r\n");

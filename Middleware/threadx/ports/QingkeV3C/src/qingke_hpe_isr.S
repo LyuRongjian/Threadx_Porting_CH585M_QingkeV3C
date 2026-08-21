@@ -93,7 +93,9 @@
     li      t2, 1
     bgt     t1, t2, 91f
 
-    /* 首层中断: 线程被打断则保存栈指针并切到系统栈 */
+    /* 首层中断: 线程被打断则保存栈指针并切到系统栈。
+       此时不能提前清 current_ptr，否则后续无抢占恢复路径会误判为 idle/system
+       并返回错误栈。 */
     la      t0, _tx_thread_current_ptr
     lw      t1, 0(t0)
     beqz    t1, 91f                               /* 空闲/初始化: 已在系统栈 */
@@ -129,6 +131,8 @@
     beq     t1, t2, 82f
 
     /* ==== 需要抢占: 上下文已在入口完整保存 ==== */
+    la      t0, _tx_thread_current_ptr            /* current = NULL */
+    sw      zero, 0(t0)
     la      t0, _tx_timer_time_slice              /* 保存剩余时间片 */
     lw      t2, 0(t0)
     beqz    t2, 83f

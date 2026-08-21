@@ -37,10 +37,13 @@ _tx_thread_system_return:
     sw      s10, 0x30(sp)
     sw      s11, 0x34(sp)
 
-    /* 保存线程栈指针到 TCB (偏移 8) */
+    /* 保存线程栈指针到 TCB (偏移 8)
+       先清空 current_ptr，避免中断在这段窗口里看到旧线程仍在执行并覆盖掉
+       这里刚刚保存的栈指针。 */
     la      t0, _tx_thread_current_ptr
     lw      t1, 0(t0)
     beqz    t1, .Lsystem_return_no_current
+    sw      zero, 0(t0)
     sw      sp, 8(t1)
 
     /* 保存剩余时间片: thread->time_slice = _tx_timer_time_slice; 后者清零 */
@@ -52,8 +55,6 @@ _tx_thread_system_return:
 .Lsystem_return_no_ts:
 
     /* current = NULL, 切系统栈, 进调度器 */
-    la      t0, _tx_thread_current_ptr
-    sw      zero, 0(t0)
     la      t0, _tx_thread_system_stack_ptr
     lw      sp, 0(t0)
     j       _tx_thread_schedule

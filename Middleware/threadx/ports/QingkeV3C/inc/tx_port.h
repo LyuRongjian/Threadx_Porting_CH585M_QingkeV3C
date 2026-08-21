@@ -2,20 +2,22 @@
  * tx_port.h -- ThreadX 移植定义: WCH QingKe V3C (CH58x, RV32IMAC)
  *
  * 移植模型 (参考官方 risc-v32/risc-v64 移植 + WCH EVT FreeRTOS/RT-Thread):
- *   - 中断入口使用 QingKe V3C 硬件压栈 (HPE, INTSYSCR.HWSTKEN=1, 由启动文件配置),
- *     16 个调用者保存寄存器由硬件压入被打断者的栈, mret 时硬件自动弹出;
- *   - 移植层在每个中断入口追加保存 s0-s11/mstatus/mepc 构成 ThreadX 中断栈帧,
+ *   - 启动文件关闭 QingKe V3C 硬件压栈 (HPE, INTSYSCR.HWSTKEN=0),
+ *     避免 mret 的隐藏硬件状态影响线程恢复;
+ *   - 移植层在每个中断入口保存完整通用寄存器/mstatus/mepc 构成
+ *     ThreadX 中断栈帧,
  *     并维护 _tx_thread_system_state, 中断退出时统一做出抢占判定;
  *   - 上下文切换不使用 SW 软件中断, 与官方 ThreadX 移植一致;
  *   - 中断处理期间全程关闭 MIE (软件嵌套由 system_state 计数保护)。
  *
  * 线程栈帧布局 (低地址在前, 单位: 字节):
  *   +0x00  帧类型: 0=主动(solicited), 1=中断(interrupt)
- *   +0x04  ra (主动帧) / 保留 (中断帧)
- *   +0x08  s0        +0x0C s1    ... +0x34 s11
- *   +0x38  mstatus
- *   +0x3C  mepc (中断帧) / 保留 (主动帧)
- *   中断帧之后紧跟 HPE 硬件帧 (16 字, 由硬件压栈/出栈, 软件不感知其布局)
+ *   主动帧为 16 字 (64 字节): +0x04 ra, +0x08..+0x34 s0-s11,
+ *     +0x38 mstatus;
+ *   中断帧为 32 字 (128 字节): +0x04 ra, +0x08..+0x20 t0-t6,
+ *     +0x24..+0x40 a0-a7, +0x44..+0x70 s0-s11,
+ *     +0x74 mstatus, +0x78 mepc;
+ *   中断帧为完整软件帧, 不依赖 HPE 硬件帧布局。
  ***************************************************************************/
 #ifndef TX_PORT_H
 #define TX_PORT_H
@@ -160,7 +162,7 @@ UINT                    _tx_thread_interrupt_control(UINT new_posture);
 #ifndef __ASSEMBLER__
 #ifdef TX_THREAD_INIT
 CHAR _tx_version_id[] =
-    "(c) 2024 Microsoft Corp. ThreadX QingKe V3C/CH58x Port (HPE) 6.4.x";
+   "(c) 2024 Microsoft Corp. ThreadX QingKe V3C/CH58x Port (software context) 6.4.x";
 #else
 extern CHAR _tx_version_id[];
 #endif
