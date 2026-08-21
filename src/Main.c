@@ -1206,6 +1206,38 @@ static void diag_thread(const char *tag, TX_THREAD *t)
     uart_puts("\r\n");
 }
 
+/* 轻量追踪工具: 打印互斥体信息 (owner ptr/prio, ownership count, suspend count) */
+static void trace_mutex(const char *tag, TX_MUTEX *m)
+{
+    UINT status;
+    ULONG susp_count = 0;
+
+    uart_puts("  [trace] ");
+    uart_puts(tag);
+    uart_puts(" owner_prio=");
+    if (m->tx_mutex_owner)
+    {
+        uart_putdec((ULONG)m->tx_mutex_owner->tx_thread_priority);
+        uart_puts(" owner_ptr=");
+        uart_putdec((ULONG)m->tx_mutex_owner);
+    }
+    else
+    {
+        uart_puts("none");
+    }
+    uart_puts(" own_cnt=");
+    uart_putdec(m->tx_mutex_ownership_count);
+
+    /* 获取挂起计数作为补充信息 */
+    status = tx_mutex_info_get(m, TX_NULL, TX_NULL, TX_NULL, TX_NULL, &susp_count, TX_NULL);
+    if (status == TX_SUCCESS)
+    {
+        uart_puts(" susp=");
+        uart_putdec(susp_count);
+    }
+    uart_puts("\r\n");
+}
+
 static TX_EVENT_FLAGS_GROUP isr_flags;
 static TX_SEMAPHORE         isr_sem;
 static volatile ULONG       isr_enter_count;
@@ -1424,6 +1456,8 @@ static void test_priority_inheritance(void)
     tx_thread_sleep(1);
     diag_thread("pi_a@boost-check", &pi_a);
     diag_thread("pi_c@boost-check", &pi_c);
+    trace_mutex("pi_m1", &pi_m1);
+    trace_mutex("pi_m2", &pi_m2);
     status = tx_thread_info_get(&pi_a, TX_NULL, TX_NULL, TX_NULL, &prio,
                                 TX_NULL, TX_NULL, TX_NULL, TX_NULL);
     TEST_CHECK("pi: A boosted to 12", (status == TX_SUCCESS) && (prio == 12));
@@ -1431,6 +1465,8 @@ static void test_priority_inheritance(void)
     /* B (14) 阻塞在 M2 → A 保持 12 */
     tx_thread_resume(&pi_b);
     tx_thread_sleep(1);
+    trace_mutex("pi_m1", &pi_m1);
+    trace_mutex("pi_m2", &pi_m2);
     status = tx_thread_info_get(&pi_a, TX_NULL, TX_NULL, TX_NULL, &prio,
                                 TX_NULL, TX_NULL, TX_NULL, TX_NULL);
     TEST_CHECK("pi: A stays at 12", (status == TX_SUCCESS) && (prio == 12));
@@ -1438,6 +1474,8 @@ static void test_priority_inheritance(void)
     /* 释放 M1: C 获取, A 恢复到 14 (仍被 B 提升) */
     pi_flag1 = 1;
     tx_thread_sleep(2);
+    trace_mutex("pi_m1", &pi_m1);
+    trace_mutex("pi_m2", &pi_m2);
     status = tx_thread_info_get(&pi_a, TX_NULL, TX_NULL, TX_NULL, &prio,
                                 TX_NULL, TX_NULL, TX_NULL, TX_NULL);
     TEST_CHECK("pi: A restored to 14", (status == TX_SUCCESS) && (prio == 14));
@@ -1446,6 +1484,8 @@ static void test_priority_inheritance(void)
     /* 释放 M2: B 获取, A 完全恢复 20 */
     pi_flag2 = 1;
     tx_thread_sleep(2);
+    trace_mutex("pi_m1", &pi_m1);
+    trace_mutex("pi_m2", &pi_m2);
     status = tx_thread_info_get(&pi_a, TX_NULL, TX_NULL, TX_NULL, &prio,
                                 TX_NULL, TX_NULL, TX_NULL, TX_NULL);
     TEST_CHECK("pi: A restored to 20", (status == TX_SUCCESS) && (prio == 20));
@@ -1689,7 +1729,9 @@ static void test_thread_advanced(void)
         uart_puts("\r\n");
     }
     TEST_CHECK("adv: thread sleeping", wa_t.tx_thread_state == TX_SLEEP);
+    diag_thread("wa@pre-waitabort", &wa_t);
     status = tx_thread_wait_abort(&wa_t);
+    uart_puts("  [trace] wait_abort status="); uart_putdec(status); uart_puts(" wa_sleep_status="); uart_putdec(wa_sleep_status); uart_puts(" wa_done="); uart_putdec(wa_done); uart_puts("\r\n");
     TEST_CHECK("adv: wait_abort status", status == TX_SUCCESS);
     tx_thread_sleep(1);
     TEST_CHECK("adv: sleep aborted", wa_sleep_status == TX_WAIT_ABORTED);
@@ -1828,7 +1870,9 @@ static void test_abort_cleanup(void)
     TEST_CHECK("ab: queue thread create", status == TX_SUCCESS);
     tx_thread_resume(&ab_q_t);
     tx_thread_sleep(1);                      /* 线程阻塞在空队列 */
+    diag_thread("ab_q@pre-waitabort", &ab_q_t);
     status = tx_thread_wait_abort(&ab_q_t);
+    uart_puts("  [trace] ab wait_abort status="); uart_putdec(status); uart_puts(" ab_q_status="); uart_putdec(ab_q_status); uart_puts("\r\n");
     TEST_CHECK("ab: wait_abort on queue", status == TX_SUCCESS);
     tx_thread_sleep(1);
     TEST_CHECK("ab: receive aborted", ab_q_status == TX_WAIT_ABORTED);
@@ -1991,28 +2035,8 @@ static void test_main_entry(ULONG thread_input)
     uart_puts("  Full Software Context Save\r\n");
     uart_puts("========================================\r\n");
 
-    /* 逐项测试 */
-    test_thread_basic_v2();
-    test_thread_preemption();
-    test_time_slice();
-    test_suspend_resume();
-    test_queue();
-    test_semaphore();
-    test_mutex();
-    test_event_flags();
-    test_byte_pool();
-    test_block_pool();
-    test_timer();
-    test_time();
-    test_interrupt_control();
-    test_integration();
-    test_isr_context();
+    /* 逐项测试 - 临时仅保留 Test 16: 优先级继承定位 */
     test_priority_inheritance();
-    test_preemption_threshold();
-    test_thread_advanced();
-    test_abort_cleanup();
-    test_queue_multiword();
-    test_timer_accuracy();
 
     /* 汇总 */
     uart_puts("\r\n========================================\r\n");

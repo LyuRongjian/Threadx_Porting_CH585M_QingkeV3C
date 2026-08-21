@@ -144,6 +144,7 @@
 82: /* 无抢占: 从 TCB 取回被打断线程的栈帧 */
     la      t0, _tx_thread_current_ptr
     lw      t1, 0(t0)
+    beqz    t1, 80f                               /* current 已被清空，直接返回系统栈 */
     lw      sp, 8(t1)
 
 80: /* 恢复软件帧 (全量) 并 mret */

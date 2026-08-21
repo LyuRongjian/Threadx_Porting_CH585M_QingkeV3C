@@ -12,6 +12,12 @@
 
 _tx_thread_system_return:
 
+    /* 先关中断，尽早消除与中断入口/退出的竞态窗口 */
+    csrci   mstatus, 0x08
+    nop
+    nop
+    nop
+
     /* 构建主动栈帧 (16 字) */
     addi    sp, sp, -64
     sw      zero, 0(sp)                           /* 帧类型 = 0 (主动) */
@@ -31,15 +37,10 @@ _tx_thread_system_return:
     sw      s10, 0x30(sp)
     sw      s11, 0x34(sp)
 
-    /* 关中断 (QingKe 流水线延时) */
-    csrci   mstatus, 0x08
-    nop
-    nop
-    nop
-
     /* 保存线程栈指针到 TCB (偏移 8) */
     la      t0, _tx_thread_current_ptr
     lw      t1, 0(t0)
+    beqz    t1, .Lsystem_return_no_current
     sw      sp, 8(t1)
 
     /* 保存剩余时间片: thread->time_slice = _tx_timer_time_slice; 后者清零 */
@@ -53,6 +54,12 @@ _tx_thread_system_return:
     /* current = NULL, 切系统栈, 进调度器 */
     la      t0, _tx_thread_current_ptr
     sw      zero, 0(t0)
+    la      t0, _tx_thread_system_stack_ptr
+    lw      sp, 0(t0)
+    j       _tx_thread_schedule
+
+.Lsystem_return_no_current:
+    /* current_ptr 已为空：直接切到系统栈并调度 */
     la      t0, _tx_thread_system_stack_ptr
     lw      sp, 0(t0)
     j       _tx_thread_schedule
